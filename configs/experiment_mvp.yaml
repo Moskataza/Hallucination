@@ -1,0 +1,22 @@
+name: mvp_pope_mathvista_hallucination
+platform: right_codes_or_configured_multimodal_gateway
+models:
+  - name: gemini
+    type: closed
+  - name: qwen_vl
+    type: open
+judge_models:
+  preferred: []
+  fallback: []
+datasets:
+  - pope
+  - mathvista
+prompts:
+  - direct
+  - evidence_grounded_cot
+sample_counts:
+  pope: 300
+  mathvista: 200
+human_annotation:
+  target_count: 40
+  groups_per_dataset_model_prompt: 5

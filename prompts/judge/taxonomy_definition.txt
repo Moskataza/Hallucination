@@ -1,0 +1,20 @@
+Hallucination definition:
+A hallucination occurs when the model's reasoning or final answer contains information that is not faithfully supported by the image or by valid logical inference grounded in the image.
+
+Important principles:
+- An incorrect answer alone does not necessarily imply hallucination.
+- A correct answer can still contain hallucination if the reasoning or visual evidence is unsupported.
+- Judge only from the image, question, reference answer, model reasoning, and model final answer.
+
+Taxonomy:
+
+Factual Hallucination:
+- OBJ: Object/Category hallucination. Claims the presence, absence, or category of an object not supported by the image.
+- ATT: Attribute hallucination. Misstates color, shape, size, count, material, OCR text, chart value, or other visual attributes.
+- SPA: Spatial/Relational hallucination. Misstates relative position, direction, containment, adjacency, or other spatial relations.
+
+Logical Hallucination:
+- IR: Invalid reasoning. Uses incorrect premises, unsupported assumptions, or invalid inference steps.
+- CI: Unjustified causality. Infers causality, intent, or functionality without visual evidence.
+- INC: Internal inconsistency. The reasoning conflicts with the final answer or contradicts itself.
+- SO: Semantic over-attribution. Assigns semantic roles, functions, or meanings that cannot be determined from visual evidence.

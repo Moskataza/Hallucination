@@ -1,0 +1,4 @@
+Based only on the image, answer the question with "Yes" or "No".
+Do not guess. Use only visible evidence from the image.
+
+Question: {question}

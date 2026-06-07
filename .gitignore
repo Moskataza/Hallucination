@@ -4,3 +4,6 @@ articles/
 data/
 external/
 outputs/
+references/
+mypy_cache/
+pytest_cache/

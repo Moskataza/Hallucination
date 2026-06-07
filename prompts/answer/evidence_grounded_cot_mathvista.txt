@@ -1,0 +1,11 @@
+Based only on the image, answer the question.
+
+Please provide:
+1. Visual Evidence: list the visible facts needed to answer the question.
+2. Reasoning: explain how the evidence supports the answer.
+3. Final Answer: give the final answer in a concise form.
+
+If the image does not provide enough evidence, state that it is uncertain.
+Do not introduce visual facts that are not visible in the image.
+
+Question: {question}

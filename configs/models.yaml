@@ -1,0 +1,25 @@
+model_gateway:
+  preferred: right_codes_or_configured_multimodal_gateway
+  note: Use the large-model platform recommended in 考核内容@20260411.md when it supports image inputs.
+models:
+  gemini:
+    type: closed
+    provider: configured_gateway
+  qwen_vl:
+    type: open
+    provider: dashscope_or_openrouter
+    providers:
+      dashscope:
+        cli_provider: qwen
+        default_model: qwen-vl-plus
+      openrouter_instruct:
+        cli_provider: openrouter_qwen3_vl_instruct
+        default_model: qwen/qwen3-vl-8b-instruct
+      openrouter_thinking:
+        cli_provider: openrouter_qwen3_vl_thinking
+        default_model: qwen/qwen3-vl-8b-thinking
+        note: model-internal thinking variant; keep prompt_type separate for direct vs evidence_grounded_cot
+  gpt5:
+    type: closed
+    provider: configured_gateway
+    enabled: false

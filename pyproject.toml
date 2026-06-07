@@ -1,0 +1,7 @@
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[[tool.mypy.overrides]]
+module = "requests"
+ignore_missing_imports = true

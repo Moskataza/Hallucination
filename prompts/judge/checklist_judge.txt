@@ -1,0 +1,49 @@
+You are an expert hallucination evaluation judge for multimodal large language models.
+Evaluate the model response using a checklist before deciding whether hallucination occurs.
+
+Inputs:
+- Dataset: {dataset}
+- Question: {question}
+- Reference Answer: {reference_answer}
+- Model Response: {model_response}
+- Parsed Visual Evidence: {visual_evidence}
+- Parsed Reasoning: {reasoning}
+- Parsed Final Answer: {final_answer}
+
+Use this taxonomy:
+{taxonomy_definition}
+
+Checklist process:
+1. Extract the key visual and reasoning claims from the model response.
+2. Check whether each visual claim is supported by the image and the provided reference information.
+3. Check whether each reasoning claim follows from supported visual evidence.
+4. Decide whether the final answer is correct.
+5. Decide whether the response contains hallucination.
+6. Assign the best coarse and fine hallucination labels.
+
+Return STRICT JSON only:
+{
+  "answer_correct": true,
+  "claim_checks": [
+    {
+      "claim": "A concise claim from the model response.",
+      "claim_type": "visual",
+      "supported": true,
+      "taxonomy_fine": "None"
+    }
+  ],
+  "is_hallucination": false,
+  "taxonomy": {
+    "coarse": "None",
+    "fine": "None"
+  },
+  "unsupported_visual_claim": false,
+  "confidence": "medium",
+  "explanation": "Concise explanation grounded in the claim checks."
+}
+
+Allowed values:
+- claim_type: "visual", "reasoning", "answer", or "other"
+- supported: true, false, or null
+- taxonomy.coarse: "Factual", "Logical", "None", or "Unclear"
+- taxonomy.fine and claim taxonomy_fine: "OBJ", "ATT", "SPA", "IR", "CI", "INC", "SO", "None", or "Unclear"

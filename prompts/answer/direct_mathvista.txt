@@ -1,0 +1,5 @@
+Based only on the image, answer the question.
+Do not use external knowledge or unsupported assumptions.
+Provide only the final answer.
+
+Question: {question}
