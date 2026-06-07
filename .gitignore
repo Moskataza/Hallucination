@@ -1,2 +1,6 @@
 .omc
 .claude
+articles/
+data/
+external/
+outputs/
