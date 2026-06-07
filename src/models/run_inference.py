@@ -52,15 +52,25 @@ def run_inference(
     )
     allowed_image_root = (Path(path_base) / image_root).resolve()
 
+    target_sample_ids: set[str] | None = None
+    if limit is not None:
+        target_sample_ids = {
+            str(sample["sample_id"])
+            for index, sample in enumerate(read_json_records(dataset_path))
+            if index >= offset and index < offset + limit
+        }
+        if target_sample_ids <= existing_sample_ids:
+            return
+
     processed_count = 0
     for index, sample in enumerate(read_json_records(dataset_path)):
         if index < offset:
             continue
+        if limit is not None and index >= offset + limit:
+            break
         sample_id = str(sample["sample_id"])
         if sample_id in existing_sample_ids:
             continue
-        if limit is not None and processed_count >= limit:
-            break
 
         prompt = render_prompt(prompt_template, sample)
         image_path = resolve_sample_image_path(

@@ -2,10 +2,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import requests
 
 from src.datasets.jsonl import read_json_records, write_jsonl
 
 from src.models.openai_compatible import (
+    OpenAICompatibleClient,
     build_chat_payload,
     extract_message_text,
     extract_native_reasoning,
@@ -316,6 +318,123 @@ def test_run_inference_saves_native_reasoning_metadata(
     assert rows[0]["inference_metadata"]["native_reasoning"] == {
         "reasoning": "native reasoning text"
     }
+
+
+def test_run_inference_resume_limit_does_not_process_beyond_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    image_root = tmp_path / "data/raw"
+    image_root.mkdir(parents=True)
+    image = image_root / "sample.jpg"
+    image.write_bytes(b"abc")
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {
+                "sample_id": f"sample_{index}",
+                "dataset": "pope",
+                "task_type": "vqa_yes_no",
+                "image_path": "data/raw/sample.jpg",
+                "question": "Is there a dog?",
+                "reference_answer": "no",
+            }
+            for index in range(3)
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+    write_jsonl(
+        output,
+        [
+            {
+                "run_id": "run_1",
+                "sample_id": "sample_0",
+                "dataset": "pope",
+                "model": "gemini-2.5-flash",
+                "model_type": "closed",
+                "prompt_type": "direct",
+                "prompt_version": "v1",
+                "raw_response": "No",
+                "parsed": {"final_answer": "No", "parse_status": "ok"},
+                "inference_metadata": {},
+            }
+        ],
+    )
+
+    class UnexpectedClient:
+        def __init__(self, config: Any) -> None:
+            self.config = config
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("resume should not process samples outside limit")
+
+    monkeypatch.setattr(
+        "src.models.run_inference.OpenAICompatibleClient", UnexpectedClient
+    )
+
+    run_inference(
+        dataset_path=dataset,
+        prompt_path=prompt,
+        output_path=output,
+        provider="gemini_local",
+        run_id="run_1",
+        prompt_type="direct",
+        path_base=tmp_path,
+        limit=1,
+        resume=True,
+    )
+
+    rows = list(read_json_records(output))
+    assert [row["sample_id"] for row in rows] == ["sample_0"]
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+
+    def json(self) -> dict[str, Any]:
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+
+def test_client_retries_transient_connection_errors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls = []
+
+    def fake_post(*args: Any, **kwargs: Any) -> _FakeResponse:
+        calls.append((args, kwargs))
+        if len(calls) == 1:
+            raise requests.ConnectionError("temporary network failure")
+        return _FakeResponse(200)
+
+    monkeypatch.setattr("src.models.openai_compatible.requests.post", fake_post)
+    monkeypatch.setattr("src.models.openai_compatible.time.sleep", lambda _: None)
+    client = OpenAICompatibleClient(
+        get_provider_config("gemini_local"), max_retries=1, retry_delay_seconds=0
+    )
+
+    response = client._post_with_retries("https://example.test", headers={}, payload={})
+
+    assert response.status_code == 200
+    assert len(calls) == 2
+
+
+def test_client_does_not_retry_bad_request(monkeypatch: pytest.MonkeyPatch):
+    calls = []
+
+    def fake_post(*args: Any, **kwargs: Any) -> _FakeResponse:
+        calls.append((args, kwargs))
+        return _FakeResponse(400)
+
+    monkeypatch.setattr("src.models.openai_compatible.requests.post", fake_post)
+    client = OpenAICompatibleClient(get_provider_config("gemini_local"), max_retries=2)
+
+    with pytest.raises(RuntimeError, match="status 400"):
+        client._post_with_retries("https://example.test", headers={}, payload={})
+
+    assert len(calls) == 1
 
 
 def test_provider_configs():

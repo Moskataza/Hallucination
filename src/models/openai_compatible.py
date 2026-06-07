@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -56,9 +57,17 @@ PROVIDERS: dict[str, ProviderConfig] = {
 
 
 class OpenAICompatibleClient:
-    def __init__(self, config: ProviderConfig, timeout: int = 120) -> None:
+    def __init__(
+        self,
+        config: ProviderConfig,
+        timeout: int = 120,
+        max_retries: int = 2,
+        retry_delay_seconds: float = 1.0,
+    ) -> None:
         self.config = config
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_delay_seconds = retry_delay_seconds
 
     def chat_completion(
         self,
@@ -91,20 +100,50 @@ class OpenAICompatibleClient:
             reasoning_max_tokens=reasoning_max_tokens,
             provider_name=self.config.name,
         )
-        response = requests.post(
+        response = self._post_with_retries(
             f"{self.config.base_url.rstrip('/')}/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
-            json=payload,
-            timeout=self.timeout,
+            payload=payload,
         )
-        if response.status_code >= 400:
-            raise RuntimeError(
-                f"Model API request failed with status {response.status_code}"
-            )
         return response.json()
+
+    def _post_with_retries(
+        self, url: str, *, headers: dict[str, str], payload: dict[str, Any]
+    ) -> requests.Response:
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.timeout,
+                )
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_error = exc
+                if attempt >= self.max_retries:
+                    raise
+                time.sleep(self.retry_delay_seconds)
+                continue
+
+            if response.status_code < 400:
+                return response
+            if response.status_code not in {429} and response.status_code < 500:
+                raise RuntimeError(
+                    f"Model API request failed with status {response.status_code}"
+                )
+            if attempt >= self.max_retries:
+                raise RuntimeError(
+                    f"Model API request failed with status {response.status_code}"
+                )
+            time.sleep(self.retry_delay_seconds)
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Model API request failed")
 
 
 def build_chat_payload(
