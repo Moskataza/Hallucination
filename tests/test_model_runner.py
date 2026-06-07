@@ -21,6 +21,12 @@ from src.models.run_inference import (
     resolve_sample_image_path,
     run_inference,
 )
+from src.models.run_one_tenth_inference import (
+    InferenceGroup,
+    count_completed_target_prefix,
+    count_completed_target_samples,
+    resume_groups,
+)
 
 
 def test_image_to_data_url_encodes_local_file(tmp_path: Path):
@@ -318,6 +324,100 @@ def test_run_inference_saves_native_reasoning_metadata(
     assert rows[0]["inference_metadata"]["native_reasoning"] == {
         "reasoning": "native reasoning text"
     }
+
+
+def test_count_completed_target_samples_uses_existing_target_sample_ids(tmp_path: Path):
+    dataset = tmp_path / "samples.jsonl"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {"sample_id": f"sample_{index}"}
+            for index in range(5)
+        ],
+    )
+    write_jsonl(
+        output,
+        [
+            {"sample_id": "sample_0"},
+            {"sample_id": "sample_2"},
+            {"sample_id": "sample_4"},
+            {"sample_id": "outside"},
+        ],
+    )
+    group = InferenceGroup(
+        run_id="run_1",
+        dataset_path=str(dataset),
+        prompt_path="prompt.txt",
+        output_path=str(output),
+        provider="gemini_local",
+        limit=3,
+        max_tokens=128,
+        dataset="pope",
+        model="gemini",
+        prompt="direct",
+    )
+
+    assert count_completed_target_samples(group) == 2
+    assert count_completed_target_prefix(group) == 1
+
+
+
+def test_resume_groups_uses_existing_output_prefix_and_resume_true(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {"sample_id": f"sample_{index}"}
+            for index in range(5)
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+    write_jsonl(output, [{"sample_id": "sample_0"}])
+    group = InferenceGroup(
+        run_id="run_1",
+        dataset_path=str(dataset),
+        prompt_path=str(prompt),
+        output_path=str(output),
+        provider="gemini_local",
+        limit=3,
+        max_tokens=128,
+        dataset="pope",
+        model="gemini",
+        prompt="direct",
+    )
+    calls = []
+
+    def fake_run_inference(**kwargs: Any) -> None:
+        calls.append(kwargs)
+        rows = list(read_json_records(output))
+        target_limit = kwargs["limit"]
+        existing = {row["sample_id"] for row in rows}
+        for index, sample in enumerate(read_json_records(dataset)):
+            if index >= target_limit:
+                break
+            if sample["sample_id"] not in existing:
+                rows.append({"sample_id": sample["sample_id"]})
+        write_jsonl(output, rows)
+
+    monkeypatch.setattr(
+        "src.models.run_one_tenth_inference.run_inference", fake_run_inference
+    )
+
+    resume_groups([group], chunk_size=1)
+
+    assert [call["limit"] for call in calls] == [2, 3]
+    assert all(call["resume"] is True for call in calls)
+    assert [row["sample_id"] for row in read_json_records(output)] == [
+        "sample_0",
+        "sample_1",
+        "sample_2",
+    ]
+
 
 
 def test_run_inference_resume_limit_does_not_process_beyond_target(
