@@ -1,7 +1,12 @@
+"""使用 zero-shot LLM judge 将模型回答转成结构化幻觉检测结果。"""
+
 from __future__ import annotations
 
 import argparse
 import json
+import tempfile
+import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -17,7 +22,6 @@ from src.datasets.schema import (
 from src.detectors.prompt_rendering import render_prompt_template
 from src.detectors.taxonomy import (
     FACTUAL_TYPES,
-    FINE_TYPES,
     infer_coarse_from_fine,
     normalize_fine_label,
 )
@@ -27,6 +31,7 @@ from src.models.openai_compatible import (
     get_provider_config,
 )
 from src.models.run_inference import resolve_sample_image_path
+from src.pipelines.compatibility import is_detector_row_compatible
 
 _LABEL_ORDER = ["OBJ", "ATT", "SPA", "IR", "CI", "INC", "SO"]
 _CLAIM_TYPES = {
@@ -82,6 +87,8 @@ def render_zero_shot_judge_prompt(
     taxonomy_definition: str,
     template_path: str | Path = "prompts/judge/zero_shot_judge.txt",
 ) -> str:
+    """把样本、模型回答和 taxonomy 定义填入 judge prompt 模板。"""
+
     template = Path(template_path).read_text(encoding="utf-8")
     return render_prompt_template(
         template,
@@ -102,6 +109,8 @@ def render_zero_shot_judge_prompt(
 
 
 def parse_judge_output(raw_text: str) -> dict[str, Any]:
+    """解析 judge JSON，并统一成 detector 后续校验需要的字段。"""
+
     payload = _load_judge_json(raw_text)
     if payload is None:
         return _fallback_details("Could not parse judge response as JSON.")
@@ -109,12 +118,14 @@ def parse_judge_output(raw_text: str) -> dict[str, Any]:
 
 
 def normalize_judge_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """把 judge 返回的多种标签表达统一成主标签、向量和 claim 检查列表。"""
+
     raw_claim_checks = payload.get("claim_checks")
     has_claim_checks = isinstance(raw_claim_checks, list)
     claim_checks = _normalize_claim_checks(raw_claim_checks)
     labels = _labels_from_payload(payload, claim_checks, has_claim_checks)
     vector = [1 if label in labels else 0 for label in _LABEL_ORDER]
-    is_hallucination = bool(labels)
+    raw_is_hallucination = _coerce_optional_bool(payload.get("is_hallucination"))
     primary_label = _select_primary_label(labels)
     coarse_labels = _coarse_labels(labels)
     unsupported_visual_claim = _coerce_optional_bool(
@@ -127,7 +138,8 @@ def normalize_judge_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "answer_correct": _coerce_optional_bool(payload.get("answer_correct")),
-        "is_hallucination": is_hallucination,
+        "is_hallucination": bool(labels),
+        "raw_is_hallucination": raw_is_hallucination,
         "label_order": list(_LABEL_ORDER),
         "hallucination_vector": vector,
         "hallucination_labels": [label for label in _LABEL_ORDER if label in labels],
@@ -147,7 +159,11 @@ def details_to_detector_result(
     details: dict[str, Any],
     raw_judge_response: str,
     run_id: str,
+    judge_provider: str | None = None,
 ) -> DetectorResult:
+    details = dict(details)
+    if judge_provider is not None:
+        details["judge_provider"] = judge_provider
     primary_label = cast(
         FineTaxonomy,
         normalize_fine_label(str(details.get("primary_label", "Unclear"))),
@@ -175,12 +191,157 @@ def details_to_detector_result(
     )
 
 
+def _unclear_detector_result(
+    sample: EvalSample,
+    response: ModelResponse,
+    *,
+    run_id: str,
+    explanation: str,
+    fallback_source: str,
+    raw_judge_response: str = "",
+) -> DetectorResult:
+    details = {
+        "answer_correct": None,
+        "is_hallucination": None,
+        "label_order": _LABEL_ORDER,
+        "hallucination_vector": [0] * len(_LABEL_ORDER),
+        "hallucination_labels": [],
+        "primary_label": "Unclear",
+        "coarse_labels": ["Unclear"],
+        "unsupported_visual_claim": None,
+        "confidence": "low",
+        "claim_checks": [],
+        "fallback_source": fallback_source,
+        "explanation": explanation,
+    }
+    return details_to_detector_result(
+        sample=sample,
+        response=response,
+        details=details,
+        raw_judge_response=raw_judge_response,
+        run_id=run_id,
+    )
+
+
+
+def build_failed_model_response_detector_result(
+    sample: EvalSample,
+    response: ModelResponse,
+    *,
+    run_id: str,
+) -> DetectorResult:
+    error = str(response.inference_metadata.get("error", "Model inference failed."))
+    return _unclear_detector_result(
+        sample,
+        response,
+        run_id=run_id,
+        fallback_source="model_inference_failed",
+        explanation=f"Model response is unavailable because inference failed: {error}",
+    )
+
+
+
+def build_failed_judge_detector_result(
+    sample: EvalSample,
+    response: ModelResponse,
+    *,
+    run_id: str,
+    error: Exception,
+) -> DetectorResult:
+    return _unclear_detector_result(
+        sample,
+        response,
+        run_id=run_id,
+        fallback_source="judge_inference_failed",
+        explanation=f"Judge inference failed: {error}",
+        raw_judge_response="",
+    )
+
+
+
+def _build_client(
+    provider_config: Any,
+    *,
+    request_timeout_seconds: int,
+    request_max_retries: int,
+) -> JudgeClient:
+    try:
+        return OpenAICompatibleClient(
+            provider_config,
+            timeout=request_timeout_seconds,
+            max_retries=request_max_retries,
+        )
+    except TypeError:
+        try:
+            return OpenAICompatibleClient(provider_config, timeout=request_timeout_seconds)
+        except TypeError:
+            return OpenAICompatibleClient(provider_config)
+
+
+
+def _is_failed_model_response(response: ModelResponse) -> bool:
+    return response.inference_metadata.get("status") == "failed"
+
+
+def _has_reference_answer(sample: EvalSample) -> bool:
+    return sample.reference_answer.strip() not in {"", "UNAVAILABLE"}
+
+
+
+def _judge_response_with_retries(
+    sample: EvalSample,
+    response: ModelResponse,
+    *,
+    client: JudgeClient,
+    run_id: str,
+    provider: str | None = None,
+    model: str | None = _DEFAULT_JUDGE_MODEL,
+    taxonomy_path: str | Path = "prompts/judge/taxonomy_definition.txt",
+    template_path: str | Path = "prompts/judge/zero_shot_judge.txt",
+    path_base: str | Path = ".",
+    image_root: str | Path = "data/raw",
+    temperature: float = 0,
+    max_tokens: int = 1024,
+    max_image_bytes: int = _DEFAULT_MAX_IMAGE_BYTES,
+    max_attempts: int = 3,
+) -> DetectorResult:
+    """对同一条模型回答重复调用 judge，直到拿到可校验的结构化结果。"""
+
+    last_error: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return judge_response(
+                sample,
+                response,
+                client=client,
+                run_id=run_id,
+                provider=provider,
+                model=model,
+                taxonomy_path=taxonomy_path,
+                template_path=template_path,
+                path_base=path_base,
+                image_root=image_root,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_image_bytes=max_image_bytes,
+            )
+        except Exception as exc:
+            last_error = exc
+            if attempt < max_attempts - 1:
+                time.sleep(0.5 * (attempt + 1))
+    raise RuntimeError(
+        f"Judge failed after {max_attempts} attempts for {_model_response_id(response)}: {last_error}"
+    ) from last_error
+
+
+
 def judge_response(
     sample: EvalSample,
     response: ModelResponse,
     *,
     client: JudgeClient,
     run_id: str,
+    provider: str | None = None,
     model: str | None = _DEFAULT_JUDGE_MODEL,
     taxonomy_path: str | Path = "prompts/judge/taxonomy_definition.txt",
     template_path: str | Path = "prompts/judge/zero_shot_judge.txt",
@@ -190,6 +351,8 @@ def judge_response(
     max_tokens: int = 1024,
     max_image_bytes: int = _DEFAULT_MAX_IMAGE_BYTES,
 ) -> DetectorResult:
+    """调用 judge 模型并把 JSON 输出转换成 DetectorResult。"""
+
     taxonomy_definition = Path(taxonomy_path).read_text(encoding="utf-8")
     prompt = render_zero_shot_judge_prompt(
         sample, response, taxonomy_definition, template_path
@@ -207,12 +370,19 @@ def judge_response(
     )
     raw_judge_response = extract_message_text(api_response)
     details = parse_judge_output(raw_judge_response)
+    if details.get("fallback_source") == "judge_output_parse_failed":
+        raise ValueError("Could not parse judge response as JSON.")
+    if details.get("raw_is_hallucination") is None:
+        raise ValueError("Judge response has null required detector fields.")
+    if details.get("answer_correct") is None and _has_reference_answer(sample):
+        raise ValueError("Judge response has null answer correctness despite available reference answer.")
     return details_to_detector_result(
         sample=sample,
         response=response,
         details=details,
         raw_judge_response=raw_judge_response,
         run_id=run_id,
+        judge_provider=provider,
     )
 
 
@@ -236,42 +406,103 @@ def detect_file(
     allow_missing: bool = False,
     overwrite: bool = False,
     resume: bool = False,
+    concurrency: int = 1,
+    judge_max_attempts: int = 3,
+    request_timeout_seconds: int = 120,
+    request_max_retries: int = 2,
 ) -> None:
+    """对模型回答文件运行 detector，resume 时只补齐缺失或无效的判定行。"""
+
     if overwrite and resume:
         raise ValueError("Use either overwrite or resume, not both.")
+    if concurrency < 1:
+        raise ValueError("concurrency must be at least 1")
+    if judge_max_attempts < 1:
+        raise ValueError("judge_max_attempts must be at least 1")
+    if request_timeout_seconds < 1:
+        raise ValueError("request_timeout_seconds must be at least 1")
+    if request_max_retries < 0:
+        raise ValueError("request_max_retries must be at least 0")
 
-    output = Path(output_path)
-    rows, existing_ids = _prepare_output_rows(
-        output, overwrite=overwrite, resume=resume
-    )
     samples = {
         row["sample_id"]: EvalSample.from_dict(row)
         for row in read_json_records(samples_path)
     }
-    client: JudgeClient | None = None
-    missing_sample_ids = []
-    processed_count = 0
+    output = Path(output_path)
+    response_rows = _response_rows_by_id(responses_path)
+    rows, existing_ids = _prepare_output_rows(
+        output,
+        samples=samples,
+        overwrite=overwrite,
+        resume=resume,
+        run_id=run_id,
+        provider=provider,
+        response_rows=response_rows,
+    )
+    response_indices = _response_indices(responses_path)
+    indexed_rows = [
+        (response_indices.get(str(row["model_response_id"]), len(response_indices) + index), row)
+        for index, row in enumerate(rows)
+    ]
+    target_response_ids = _target_response_ids(
+        responses_path=responses_path, offset=offset, limit=limit
+    )
+    if target_response_ids and target_response_ids <= existing_ids:
+        _validate_completed_detector_output(
+            output,
+            samples,
+            target_response_ids,
+            run_id=run_id,
+            provider=provider,
+            response_rows=response_rows,
+        )
+        return
+    pending, missing_sample_ids = _collect_pending_judgements(
+        responses_path=responses_path,
+        samples=samples,
+        existing_ids=existing_ids,
+        offset=offset,
+        limit=limit,
+    )
 
-    for index, row in enumerate(read_json_records(responses_path)):
-        if index < offset:
-            continue
-        if limit is not None and processed_count >= limit:
-            break
-        response = ModelResponse.from_dict(row)
-        response_id = _model_response_id(response)
-        if response_id in existing_ids:
-            continue
-        sample = samples.get(response.sample_id)
-        if sample is None:
-            missing_sample_ids.append(response.sample_id)
-            continue
-
-        if client is None:
-            client = OpenAICompatibleClient(get_provider_config(provider))
-        result = judge_response(
-            sample,
-            response,
-            client=client,
+    if concurrency == 1:
+        client: JudgeClient | None = None
+        for response_index, sample, response in pending:
+            if _is_failed_model_response(response):
+                raise RuntimeError(
+                    f"Cannot run detector for failed model response {_model_response_id(response)}. "
+                    "Rerun model inference with --resume until the response succeeds."
+                )
+            if client is None:
+                client = _build_client(
+                    get_provider_config(provider),
+                    request_timeout_seconds=request_timeout_seconds,
+                    request_max_retries=request_max_retries,
+                )
+            result = _judge_response_with_retries(
+                sample,
+                response,
+                client=client,
+                run_id=run_id,
+                provider=provider,
+                model=model,
+                taxonomy_path=taxonomy_path,
+                template_path=template_path,
+                path_base=path_base,
+                image_root=image_root,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_image_bytes=max_image_bytes,
+                max_attempts=judge_max_attempts,
+            )
+            indexed_rows.append((response_index, result.to_dict()))
+            existing_ids.add(_model_response_id(response))
+            _write_indexed_rows(output, indexed_rows)
+    else:
+        _detect_pending_concurrently(
+            pending=pending,
+            concurrency=concurrency,
+            provider=provider,
             run_id=run_id,
             model=model,
             taxonomy_path=taxonomy_path,
@@ -281,22 +512,222 @@ def detect_file(
             temperature=temperature,
             max_tokens=max_tokens,
             max_image_bytes=max_image_bytes,
+            judge_max_attempts=judge_max_attempts,
+            request_timeout_seconds=request_timeout_seconds,
+            request_max_retries=request_max_retries,
+            existing_ids=existing_ids,
+            indexed_rows=indexed_rows,
+            output=output,
         )
-        rows.append(result.to_dict())
-        existing_ids.add(response_id)
-        processed_count += 1
-        write_jsonl(output, rows)
 
     if missing_sample_ids and not allow_missing:
         preview = ", ".join(missing_sample_ids[:5])
         raise ValueError(
             f"{len(missing_sample_ids)} responses did not match samples: {preview}"
         )
+    _validate_completed_detector_output(
+        output,
+        samples,
+        target_response_ids,
+        run_id=run_id,
+        provider=provider,
+        response_rows=response_rows,
+    )
+
+
+def _response_rows_by_id(responses_path: str | Path) -> dict[str, dict[str, Any]]:
+    return {
+        _model_response_id(ModelResponse.from_dict(row)): row
+        for row in read_json_records(responses_path)
+    }
+
+
+def _response_indices(responses_path: str | Path) -> dict[str, int]:
+    return {
+        _model_response_id(ModelResponse.from_dict(row)): index
+        for index, row in enumerate(read_json_records(responses_path))
+    }
+
+
+def _target_response_ids(
+    *, responses_path: str | Path, offset: int, limit: int | None
+) -> set[str]:
+    return {
+        _model_response_id(ModelResponse.from_dict(row))
+        for index, row in enumerate(read_json_records(responses_path))
+        if index >= offset and (limit is None or index < offset + limit)
+    }
+
+
+
+def _collect_pending_judgements(
+    *,
+    responses_path: str | Path,
+    samples: dict[str, EvalSample],
+    existing_ids: set[str],
+    offset: int,
+    limit: int | None,
+) -> tuple[list[tuple[int, EvalSample, ModelResponse]], list[str]]:
+    pending = []
+    missing_sample_ids = []
+    for index, row in enumerate(read_json_records(responses_path)):
+        if index < offset:
+            continue
+        if limit is not None and index >= offset + limit:
+            break
+        response = ModelResponse.from_dict(row)
+        response_id = _model_response_id(response)
+        if response_id in existing_ids:
+            continue
+        sample = samples.get(response.sample_id)
+        if sample is None:
+            missing_sample_ids.append(response.sample_id)
+            continue
+        pending.append((index, sample, response))
+    return pending, missing_sample_ids
+
+
+def _detect_pending_concurrently(
+    *,
+    pending: list[tuple[int, EvalSample, ModelResponse]],
+    concurrency: int,
+    provider: str,
+    run_id: str,
+    model: str | None,
+    taxonomy_path: str | Path,
+    template_path: str | Path,
+    path_base: str | Path,
+    image_root: str | Path,
+    temperature: float,
+    max_tokens: int,
+    max_image_bytes: int,
+    judge_max_attempts: int,
+    request_timeout_seconds: int,
+    request_max_retries: int,
+    existing_ids: set[str],
+    indexed_rows: list[tuple[int, dict[str, Any]]],
+    output: Path,
+) -> None:
+    """在固定并发窗口内执行 judge；失败会抛给外层 group resume 继续重试。"""
+
+    failures: list[tuple[str, Exception]] = []
+    next_item = 0
+    futures: dict[
+        Future[DetectorResult], tuple[int, EvalSample, ModelResponse]
+    ] = {}
+    provider_config = get_provider_config(provider)
+
+    def submit_next(executor: ThreadPoolExecutor) -> None:
+        nonlocal next_item
+        if next_item >= len(pending):
+            return
+        response_index, sample, response = pending[next_item]
+        next_item += 1
+        if _is_failed_model_response(response):
+            raise RuntimeError(
+                f"Cannot run detector for failed model response {_model_response_id(response)}. "
+                "Rerun model inference with --resume until the response succeeds."
+            )
+        client = _build_client(
+            provider_config,
+            request_timeout_seconds=request_timeout_seconds,
+            request_max_retries=request_max_retries,
+        )
+        future = executor.submit(
+            _judge_response_with_retries,
+            sample,
+            response,
+            client=client,
+            run_id=run_id,
+            provider=provider,
+            model=model,
+            taxonomy_path=taxonomy_path,
+            template_path=template_path,
+            path_base=path_base,
+            image_root=image_root,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            max_image_bytes=max_image_bytes,
+            max_attempts=judge_max_attempts,
+        )
+        futures[future] = (response_index, sample, response)
+
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        for _ in range(min(concurrency, len(pending))):
+            submit_next(executor)
+        while futures:
+            done, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for future in done:
+                response_index, _, response = futures.pop(future)
+                response_id = _model_response_id(response)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    failures.append((response_id, exc))
+                else:
+                    if response_id not in existing_ids:
+                        indexed_rows.append((response_index, result.to_dict()))
+                        existing_ids.add(response_id)
+                        _write_indexed_rows(output, indexed_rows)
+                submit_next(executor)
+
+    if failures:
+        failed_items = ", ".join(
+            f"{response_id}: {error}" for response_id, error in failures[:10]
+        )
+        suffix = "" if len(failures) <= 10 else f" ... and {len(failures) - 10} more"
+        raise RuntimeError(f"Failed judge inference for responses: {failed_items}{suffix}")
+
+
+def _write_indexed_rows(
+    output: Path, indexed_rows: list[tuple[int, dict[str, Any]]]
+) -> None:
+    rows_by_response_id = {
+        str(row["model_response_id"]): (index, row) for index, row in indexed_rows
+    }
+    rows = [
+        row
+        for _, row in sorted(rows_by_response_id.values(), key=lambda item: item[0])
+    ]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=output.parent,
+        delete=False,
+    ) as file:
+        temp_path = Path(file.name)
+        try:
+            for row in rows:
+                file.write(json.dumps(row, ensure_ascii=False) + "\n")
+            file.flush()
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+    for attempt in range(5):
+        try:
+            temp_path.replace(output)
+            return
+        except PermissionError:
+            if attempt == 4:
+                temp_path.unlink(missing_ok=True)
+                raise
+            time.sleep(0.1 * (attempt + 1))
+
 
 
 def _prepare_output_rows(
-    output_path: Path, *, overwrite: bool, resume: bool
+    output_path: Path,
+    *,
+    samples: dict[str, EvalSample],
+    overwrite: bool,
+    resume: bool,
+    run_id: str | None = None,
+    provider: str | None = None,
+    response_rows: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], set[str]]:
+    """读取旧 detector 输出，只保留当前配置下仍然有效且兼容的结果。"""
+
     if overwrite:
         write_jsonl(output_path, [])
         return [], set()
@@ -306,8 +737,110 @@ def _prepare_output_rows(
         raise FileExistsError(
             f"Output already exists: {output_path}. Use --overwrite or --resume."
         )
-    rows = list(read_json_records(output_path))
+    rows = [
+        row
+        for row in read_json_records(output_path)
+        if not _should_retry_detector_row(row, samples)
+        and _is_compatible_existing_detector_row(
+            row,
+            run_id=run_id,
+            provider=provider,
+            response_rows=response_rows,
+        )
+    ]
+    _write_indexed_rows(
+        output_path,
+        [(index, row) for index, row in enumerate(rows)],
+    )
     return rows, {str(row["model_response_id"]) for row in rows}
+
+
+def _is_compatible_existing_detector_row(
+    row: dict[str, Any],
+    *,
+    run_id: str | None,
+    provider: str | None,
+    response_rows: dict[str, dict[str, Any]] | None,
+) -> bool:
+    if run_id is None or provider is None or response_rows is None:
+        return True
+    response_id = str(row.get("model_response_id", ""))
+    response = response_rows.get(response_id)
+    if response is None:
+        return False
+    if str(row.get("sample_id", "")) != str(response.get("sample_id", "")):
+        return False
+    if response_id != f"{response.get('run_id')}:{response.get('sample_id')}":
+        return False
+    return is_detector_row_compatible(
+        row,
+        run_id=run_id,
+        detector="zero_shot",
+        dataset=str(response.get("dataset", "")),
+        model=str(response.get("model", "")),
+        prompt_type=str(response.get("prompt_type", "")),
+        judge_provider=provider,
+    )
+
+
+def _should_retry_detector_row(row: dict[str, Any], samples: dict[str, EvalSample]) -> bool:
+    details = row.get("details")
+    if not isinstance(details, dict):
+        details = {}
+    fallback_source = str(details.get("fallback_source", ""))
+    if fallback_source in {
+        "judge_inference_failed",
+        "judge_output_parse_failed",
+        "model_inference_failed",
+    }:
+        return True
+    if row.get("is_hallucination") is None:
+        return True
+    sample = samples.get(str(row.get("sample_id", "")))
+    if sample is None:
+        return True
+    if row.get("answer_correct") is None and _has_reference_answer(sample):
+        return True
+    explanation = str(row.get("explanation", details.get("explanation", "")))
+    return (
+        explanation.startswith("Judge inference failed:")
+        or explanation.startswith("Model response is unavailable because inference failed:")
+        or explanation == "Could not parse judge response as JSON."
+    )
+
+
+def _validate_completed_detector_output(
+    output: Path,
+    samples: dict[str, EvalSample],
+    target_response_ids: set[str],
+    *,
+    run_id: str | None = None,
+    provider: str | None = None,
+    response_rows: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    rows = list(read_json_records(output)) if output.exists() else []
+    rows_by_response_id = {str(row.get("model_response_id", "")): row for row in rows}
+    missing = sorted(target_response_ids - set(rows_by_response_id))
+    invalid = sorted(
+        response_id
+        for response_id in target_response_ids & set(rows_by_response_id)
+        if _should_retry_detector_row(rows_by_response_id[response_id], samples)
+        or not _is_compatible_existing_detector_row(
+            rows_by_response_id[response_id],
+            run_id=run_id,
+            provider=provider,
+            response_rows=response_rows,
+        )
+    )
+    if missing or invalid:
+        parts = []
+        if missing:
+            parts.append(f"missing={missing[:10]}")
+        if invalid:
+            parts.append(f"invalid={invalid[:10]}")
+        raise RuntimeError(
+            "Detector output is incomplete or invalid: " + "; ".join(parts)
+        )
 
 
 def _model_response_id(response: ModelResponse) -> str:
@@ -474,6 +1007,7 @@ def _fallback_details(explanation: str) -> dict[str, Any]:
         "unsupported_visual_claim": None,
         "confidence": "low",
         "claim_checks": [],
+        "fallback_source": "judge_output_parse_failed",
         "explanation": explanation,
     }
 
@@ -530,6 +1064,30 @@ def main() -> None:
     parser.add_argument("--allow-missing", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="Number of concurrent judge requests. File writes remain serialized.",
+    )
+    parser.add_argument(
+        "--judge-max-attempts",
+        type=int,
+        default=3,
+        help="Maximum attempts per response for judge API or malformed-output failures.",
+    )
+    parser.add_argument(
+        "--request-timeout-seconds",
+        type=int,
+        default=120,
+        help="Per-request HTTP timeout for judge API calls.",
+    )
+    parser.add_argument(
+        "--request-max-retries",
+        type=int,
+        default=2,
+        help="Maximum HTTP retries per judge request.",
+    )
     args = parser.parse_args()
 
     detect_file(
@@ -551,6 +1109,10 @@ def main() -> None:
         allow_missing=args.allow_missing,
         overwrite=args.overwrite,
         resume=args.resume,
+        concurrency=args.concurrency,
+        judge_max_attempts=args.judge_max_attempts,
+        request_timeout_seconds=args.request_timeout_seconds,
+        request_max_retries=args.request_max_retries,
     )
 
 

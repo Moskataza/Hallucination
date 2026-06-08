@@ -44,10 +44,10 @@ def _sample(image_path: str = "data/raw/pope/sample.jpg") -> EvalSample:
     )
 
 
-def _response() -> ModelResponse:
+def _response(sample_id: str = "pope_1") -> ModelResponse:
     return ModelResponse(
         run_id="model_run_1",
-        sample_id="pope_1",
+        sample_id=sample_id,
         dataset="pope",
         model="qwen/qwen3-vl-8b-instruct",
         model_type="open",
@@ -394,7 +394,9 @@ def test_detect_file_requires_resume_or_overwrite(tmp_path: Path):
     output.write_text('{"model_response_id":"model_run_1:pope_1"}\n', encoding="utf-8")
 
     with pytest.raises(FileExistsError):
-        zero_shot_judge._prepare_output_rows(output, overwrite=False, resume=False)
+        zero_shot_judge._prepare_output_rows(
+            output, samples={}, overwrite=False, resume=False
+        )
 
 
 def test_detect_file_resume_skips_existing_response(
@@ -423,7 +425,7 @@ def test_detect_file_resume_skips_existing_response(
                 "dataset": "pope",
                 "model": "qwen/qwen3-vl-8b-instruct",
                 "prompt_type": "evidence_grounded_cot",
-                "details": _judge_payload(),
+                "details": {**_judge_payload(), "judge_provider": "openrouter_qwen3_vl_instruct"},
             }
         ],
     )
@@ -446,3 +448,478 @@ def test_detect_file_resume_skips_existing_response(
     rows = list(read_jsonl(output))
     assert len(rows) == 1
     assert rows[0]["explanation"] == "already judged"
+
+
+
+def test_detect_file_resume_retries_judge_failure_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
+    write_jsonl(responses, [_response().to_dict()])
+    write_jsonl(
+        output,
+        [
+            {
+                "run_id": "judge_run_1",
+                "sample_id": "pope_1",
+                "model_response_id": "model_run_1:pope_1",
+                "detector": "response_claim_zero_shot_judge",
+                "answer_correct": None,
+                "is_hallucination": None,
+                "taxonomy": {"coarse": "Unclear", "fine": "Unclear"},
+                "unsupported_visual_claim": None,
+                "confidence": "low",
+                "explanation": "Judge inference failed: Model API request failed with status 402",
+                "raw_judge_response": "",
+                "dataset": "pope",
+                "model": "qwen/qwen3-vl-8b-instruct",
+                "prompt_type": "evidence_grounded_cot",
+                "details": {
+                    "fallback_source": "judge_inference_failed",
+                    "explanation": "Judge inference failed: Model API request failed with status 402",
+                },
+            }
+        ],
+    )
+
+    class RecoveringClient:
+        def __init__(self, config: Any) -> None:
+            self.config = config
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            return {"choices": [{"message": {"content": json.dumps(_judge_payload())}}]}
+
+    monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", RecoveringClient)
+
+    zero_shot_judge.detect_file(
+        samples,
+        responses,
+        output,
+        provider="openrouter_qwen3_vl_instruct",
+        run_id="judge_run_1",
+        resume=True,
+    )
+
+    rows = list(read_jsonl(output))
+    assert len(rows) == 1
+    assert rows[0]["answer_correct"] is False
+    assert rows[0]["is_hallucination"] is True
+    assert rows[0]["taxonomy"] == {"coarse": "Factual", "fine": "OBJ"}
+    assert rows[0]["details"]["primary_label"] == "OBJ"
+
+
+
+def test_detect_file_does_not_write_null_row_for_failed_model_response(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
+    failed_response = _response().to_dict()
+    failed_response["raw_response"] = ""
+    failed_response["parsed"] = {"final_answer": "", "parse_status": "failed"}
+    failed_response["inference_metadata"] = {
+        "status": "failed",
+        "error": "Read timed out",
+    }
+    write_jsonl(responses, [failed_response])
+
+    class UnexpectedClient:
+        def __init__(self, config: Any) -> None:
+            raise AssertionError("judge client should not be created for failed responses")
+
+    monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", UnexpectedClient)
+
+    with pytest.raises(RuntimeError, match="failed model response"):
+        zero_shot_judge.detect_file(
+            samples,
+            responses,
+            output,
+            provider="openrouter_qwen3_vl_instruct",
+            run_id="judge_run_1",
+            overwrite=True,
+            concurrency=2,
+        )
+
+    assert list(read_jsonl(output)) == []
+
+
+
+def test_detect_file_does_not_write_null_row_for_judge_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
+    response = _response().to_dict()
+    response["raw_response"] = "Visual Evidence: trigger judge failure.\nFinal Answer: Yes"
+    write_jsonl(responses, [response])
+
+    class FailingClient:
+        def __init__(self, config: Any) -> None:
+            self.config = config
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("judge failed after retries")
+
+    monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", FailingClient)
+
+    with pytest.raises(RuntimeError, match="Judge failed after 3 attempts"):
+        zero_shot_judge.detect_file(
+            samples,
+            responses,
+            output,
+            provider="openrouter_qwen3_vl_instruct",
+            run_id="judge_run_1",
+            overwrite=True,
+        )
+
+    assert list(read_jsonl(output)) == []
+
+
+
+def test_detect_file_retries_api_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
+    write_jsonl(responses, [_response().to_dict()])
+
+    class RecoveringClient:
+        def __init__(self, config: Any) -> None:
+            self.calls = 0
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("Model API request failed with status 402")
+            return {"choices": [{"message": {"content": json.dumps(_judge_payload())}}]}
+
+    monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", RecoveringClient)
+
+    zero_shot_judge.detect_file(
+        samples,
+        responses,
+        output,
+        provider="openrouter_qwen3_vl_instruct",
+        run_id="judge_run_1",
+        overwrite=True,
+    )
+
+    rows = list(read_jsonl(output))
+    assert len(rows) == 1
+    assert rows[0]["answer_correct"] is False
+    assert rows[0]["taxonomy"] == {"coarse": "Factual", "fine": "OBJ"}
+
+
+
+def test_detect_file_retries_null_required_judge_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
+    write_jsonl(responses, [_response().to_dict()])
+
+    class RecoveringClient:
+        def __init__(self, config: Any) -> None:
+            self.calls = 0
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    _judge_payload(
+                                        answer_correct=None,
+                                        is_hallucination=None,
+                                    )
+                                )
+                            }
+                        }
+                    ]
+                }
+            return {"choices": [{"message": {"content": json.dumps(_judge_payload())}}]}
+
+    monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", RecoveringClient)
+
+    zero_shot_judge.detect_file(
+        samples,
+        responses,
+        output,
+        provider="openrouter_qwen3_vl_instruct",
+        run_id="judge_run_1",
+        overwrite=True,
+    )
+
+    rows = list(read_jsonl(output))
+    assert len(rows) == 1
+    assert rows[0]["answer_correct"] is False
+    assert rows[0]["is_hallucination"] is True
+    assert rows[0]["taxonomy"] == {"coarse": "Factual", "fine": "OBJ"}
+
+
+
+def test_detect_file_retries_null_hallucination_even_with_answer_correct(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
+    write_jsonl(responses, [_response().to_dict()])
+
+    class RecoveringClient:
+        def __init__(self, config: Any) -> None:
+            self.calls = 0
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    _judge_payload(
+                                        answer_correct=False,
+                                        is_hallucination=None,
+                                    )
+                                )
+                            }
+                        }
+                    ]
+                }
+            return {"choices": [{"message": {"content": json.dumps(_judge_payload())}}]}
+
+    monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", RecoveringClient)
+
+    zero_shot_judge.detect_file(
+        samples,
+        responses,
+        output,
+        provider="openrouter_qwen3_vl_instruct",
+        run_id="judge_run_1",
+        overwrite=True,
+    )
+
+    rows = list(read_jsonl(output))
+    assert len(rows) == 1
+    assert rows[0]["answer_correct"] is False
+    assert rows[0]["is_hallucination"] is True
+    assert rows[0]["details"]["raw_is_hallucination"] is True
+
+
+
+def test_detect_file_allows_null_answer_correct_for_unavailable_reference(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    mathvista_sample = _sample("data/raw/mathvista/sample.jpg").to_dict()
+    mathvista_sample.update(
+        {
+            "sample_id": "mathvista_1",
+            "dataset": "mathvista",
+            "task_type": "visual_math_reasoning",
+            "question": "What is the answer?",
+            "reference_answer": "UNAVAILABLE",
+        }
+    )
+    mathvista_response = _response("mathvista_1").to_dict()
+    mathvista_response.update(
+        {
+            "dataset": "mathvista",
+            "raw_response": "Final Answer: I cannot determine from the image.",
+        }
+    )
+    write_jsonl(samples, [mathvista_sample])
+    write_jsonl(responses, [mathvista_response])
+
+    class UnavailableAnswerClient:
+        def __init__(self, config: Any) -> None:
+            self.calls = 0
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            payload = _judge_payload(
+                answer_correct=None,
+                is_hallucination=self.calls > 1,
+                hallucination_vector=[0, 0, 0, 0, 0, 0, 0],
+                hallucination_labels=[],
+                primary_label="None",
+                coarse_labels=["None"],
+                unsupported_visual_claim=False,
+                claim_checks=[],
+                explanation="No unsupported visual claim is present.",
+            )
+            if self.calls == 1:
+                payload["is_hallucination"] = None
+            return {"choices": [{"message": {"content": json.dumps(payload)}}]}
+
+    monkeypatch.setattr(
+        zero_shot_judge, "OpenAICompatibleClient", UnavailableAnswerClient
+    )
+
+    zero_shot_judge.detect_file(
+        samples,
+        responses,
+        output,
+        provider="openrouter_qwen3_vl_instruct",
+        run_id="judge_run_1",
+        overwrite=True,
+    )
+
+    rows = list(read_jsonl(output))
+    assert len(rows) == 1
+    assert rows[0]["answer_correct"] is None
+    assert rows[0]["is_hallucination"] is False
+    assert rows[0]["taxonomy"] == {"coarse": "None", "fine": "None"}
+
+
+
+def test_detect_file_retries_malformed_judge_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
+    write_jsonl(responses, [_response().to_dict()])
+
+    class RecoveringClient:
+        def __init__(self, config: Any) -> None:
+            self.calls = 0
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            if self.calls == 1:
+                return {"choices": [{"message": {"content": "not json"}}]}
+            return {"choices": [{"message": {"content": json.dumps(_judge_payload())}}]}
+
+    monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", RecoveringClient)
+
+    zero_shot_judge.detect_file(
+        samples,
+        responses,
+        output,
+        provider="openrouter_qwen3_vl_instruct",
+        run_id="judge_run_1",
+        overwrite=True,
+    )
+
+    rows = list(read_jsonl(output))
+    assert len(rows) == 1
+    assert rows[0]["answer_correct"] is False
+    assert rows[0]["taxonomy"] == {"coarse": "Factual", "fine": "OBJ"}
+
+
+
+def test_detect_file_concurrent_writes_results_in_response_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(
+        samples,
+        [
+            _sample("data/raw/pope/sample.jpg").to_dict(),
+            {**_sample("data/raw/pope/sample.jpg").to_dict(), "sample_id": "pope_2"},
+            {**_sample("data/raw/pope/sample.jpg").to_dict(), "sample_id": "pope_3"},
+        ],
+    )
+    write_jsonl(
+        responses,
+        [_response("pope_1").to_dict(), _response("pope_2").to_dict(), _response("pope_3").to_dict()],
+    )
+
+    class FakeClient:
+        def __init__(self, config: Any) -> None:
+            self.config = config
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            return {"choices": [{"message": {"content": json.dumps(_judge_payload())}}]}
+
+    monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", FakeClient)
+
+    zero_shot_judge.detect_file(
+        samples,
+        responses,
+        output,
+        provider="openrouter_qwen3_vl_instruct",
+        run_id="judge_run_1",
+        overwrite=True,
+        concurrency=2,
+    )
+
+    rows = list(read_jsonl(output))
+    assert [row["model_response_id"] for row in rows] == [
+        "model_run_1:pope_1",
+        "model_run_1:pope_2",
+        "model_run_1:pope_3",
+    ]
+
+
+
+def test_detect_file_concurrent_failure_persists_only_successful_results(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(
+        samples,
+        [
+            _sample("data/raw/pope/sample.jpg").to_dict(),
+            {**_sample("data/raw/pope/sample.jpg").to_dict(), "sample_id": "pope_2"},
+            {**_sample("data/raw/pope/sample.jpg").to_dict(), "sample_id": "pope_3"},
+        ],
+    )
+    second_response = _response("pope_2").to_dict()
+    second_response["raw_response"] = "Visual Evidence: trigger judge failure.\nFinal Answer: Yes"
+    write_jsonl(
+        responses,
+        [_response("pope_1").to_dict(), second_response, _response("pope_3").to_dict()],
+    )
+
+    class FakeClient:
+        def __init__(self, config: Any) -> None:
+            self.config = config
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            if "trigger judge failure" in kwargs["prompt"]:
+                raise RuntimeError("judge failed after retries")
+            return {"choices": [{"message": {"content": json.dumps(_judge_payload())}}]}
+
+    monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="model_run_1:pope_2"):
+        zero_shot_judge.detect_file(
+            samples,
+            responses,
+            output,
+            provider="openrouter_qwen3_vl_instruct",
+            run_id="judge_run_1",
+            overwrite=True,
+            concurrency=3,
+        )
+
+    rows = list(read_jsonl(output))
+    assert [row["model_response_id"] for row in rows] == [
+        "model_run_1:pope_1",
+        "model_run_1:pope_3",
+    ]
+    assert all(row["answer_correct"] is not None for row in rows)

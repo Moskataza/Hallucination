@@ -1,4 +1,5 @@
 from pathlib import Path
+import threading
 from typing import Any
 
 import pytest
@@ -229,6 +230,16 @@ def test_resolve_prompt_type_allows_explicit_type_for_custom_prompt():
     assert resolve_prompt_type("prompts/answer/custom.txt", "direct") == "direct"
 
 
+def _valid_response_row(sample_id: str) -> dict[str, Any]:
+    return {
+        "sample_id": sample_id,
+        "raw_response": "No",
+        "parsed": {"parse_status": "ok", "final_answer": "No"},
+        "inference_metadata": {},
+    }
+
+
+
 def test_resolve_prompt_type_rejects_mismatch():
     with pytest.raises(ValueError, match="suggests prompt_type=direct"):
         resolve_prompt_type(
@@ -244,13 +255,13 @@ def test_resolve_prompt_type_requires_explicit_type_for_unknown_prompt():
 
 def test_prepare_output_rows_requires_explicit_mode_for_existing_output(tmp_path: Path):
     output = tmp_path / "responses.jsonl"
-    output.write_text('{"sample_id":"x"}\n', encoding="utf-8")
+    write_jsonl(output, [_valid_response_row("x")])
 
     with pytest.raises(FileExistsError):
         _prepare_output_rows(output, overwrite=False, resume=False)
 
     rows, sample_ids = _prepare_output_rows(output, overwrite=False, resume=True)
-    assert rows == [{"sample_id": "x"}]
+    assert rows == [_valid_response_row("x")]
     assert sample_ids == {"x"}
 
     rows, sample_ids = _prepare_output_rows(output, overwrite=True, resume=False)
@@ -285,8 +296,9 @@ def test_run_inference_saves_native_reasoning_metadata(
     prompt.write_text("Question: {question}", encoding="utf-8")
 
     class FakeClient:
-        def __init__(self, config: Any) -> None:
+        def __init__(self, config: Any, timeout: int = 120) -> None:
             self.config = config
+            self.timeout = timeout
 
         def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
             assert kwargs["native_reasoning"] is True
@@ -339,10 +351,10 @@ def test_count_completed_target_samples_uses_existing_target_sample_ids(tmp_path
     write_jsonl(
         output,
         [
-            {"sample_id": "sample_0"},
-            {"sample_id": "sample_2"},
-            {"sample_id": "sample_4"},
-            {"sample_id": "outside"},
+            _valid_response_row("sample_0"),
+            _valid_response_row("sample_2"),
+            {"sample_id": "sample_4", "inference_metadata": {"status": "failed"}},
+            _valid_response_row("outside"),
         ],
     )
     group = InferenceGroup(
@@ -363,7 +375,628 @@ def test_count_completed_target_samples_uses_existing_target_sample_ids(tmp_path
 
 
 
-def test_resume_groups_uses_existing_output_prefix_and_resume_true(
+def test_run_inference_concurrent_resume_skips_existing_samples(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    image_root = tmp_path / "data/raw"
+    image_root.mkdir(parents=True)
+    image = image_root / "sample.jpg"
+    image.write_bytes(b"abc")
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {
+                "sample_id": f"sample_{index}",
+                "dataset": "pope",
+                "task_type": "vqa_yes_no",
+                "image_path": "data/raw/sample.jpg",
+                "question": "Is there a dog?",
+                "reference_answer": "no",
+            }
+            for index in range(4)
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+    write_jsonl(
+        output,
+        [
+            {
+                "run_id": "run_1",
+                "sample_id": "sample_0",
+                "dataset": "pope",
+                "model": "gemini-2.5-flash",
+                "model_type": "closed",
+                "prompt_type": "direct",
+                "prompt_version": "v1",
+                "raw_response": "No",
+                "parsed": {"final_answer": "No", "parse_status": "ok"},
+                "inference_metadata": {
+                    "provider": "gemini_local",
+                    "max_tokens": 512,
+                    "temperature": 0,
+                },
+            }
+        ],
+    )
+    seen_questions = []
+
+    class FakeClient:
+        def __init__(self, config: Any, timeout: int = 120) -> None:
+            self.config = config
+            self.timeout = timeout
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            seen_questions.append(kwargs["prompt"])
+            return {"choices": [{"message": {"content": "No"}}], "usage": {}}
+
+    monkeypatch.setattr("src.models.run_inference.OpenAICompatibleClient", FakeClient)
+
+    run_inference(
+        dataset_path=dataset,
+        prompt_path=prompt,
+        output_path=output,
+        provider="gemini_local",
+        run_id="run_1",
+        prompt_type="direct",
+        path_base=tmp_path,
+        limit=4,
+        resume=True,
+        concurrency=2,
+    )
+
+    rows = list(read_json_records(output))
+    assert [row["sample_id"] for row in rows] == [
+        "sample_0",
+        "sample_1",
+        "sample_2",
+        "sample_3",
+    ]
+    assert len(seen_questions) == 3
+
+
+
+def test_run_inference_resume_retries_and_replaces_failed_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    image_root = tmp_path / "data/raw"
+    image_root.mkdir(parents=True)
+    image = image_root / "sample.jpg"
+    image.write_bytes(b"abc")
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {
+                "sample_id": "sample_0",
+                "dataset": "pope",
+                "task_type": "vqa_yes_no",
+                "image_path": "data/raw/sample.jpg",
+                "question": "Question?",
+                "reference_answer": "no",
+            }
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+    write_jsonl(
+        output,
+        [
+            {
+                "run_id": "run_1",
+                "sample_id": "sample_0",
+                "dataset": "pope",
+                "model": "gemini-2.5-flash",
+                "model_type": "closed",
+                "prompt_type": "direct",
+                "prompt_version": "v1",
+                "raw_response": "",
+                "parsed": {"final_answer": "unclear", "parse_status": "failed"},
+                "inference_metadata": {"status": "failed", "error": "Read timed out"},
+            }
+        ],
+    )
+    seen_questions = []
+
+    class FakeClient:
+        def __init__(self, config: Any, timeout: int = 120) -> None:
+            self.config = config
+            self.timeout = timeout
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            seen_questions.append(kwargs["prompt"])
+            return {"choices": [{"message": {"content": "No"}}], "usage": {}}
+
+    monkeypatch.setattr("src.models.run_inference.OpenAICompatibleClient", FakeClient)
+
+    run_inference(
+        dataset_path=dataset,
+        prompt_path=prompt,
+        output_path=output,
+        provider="gemini_local",
+        run_id="run_1",
+        prompt_type="direct",
+        path_base=tmp_path,
+        limit=1,
+        resume=True,
+        concurrency=1,
+    )
+
+    rows = list(read_json_records(output))
+    assert len(rows) == 1
+    assert rows[0]["sample_id"] == "sample_0"
+    assert rows[0]["raw_response"] == "No"
+    assert rows[0]["inference_metadata"].get("status") != "failed"
+    assert len(seen_questions) == 1
+
+
+
+def test_run_inference_concurrent_failure_persists_successful_results(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    image_root = tmp_path / "data/raw"
+    image_root.mkdir(parents=True)
+    image = image_root / "sample.jpg"
+    image.write_bytes(b"abc")
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {
+                "sample_id": f"sample_{index}",
+                "dataset": "pope",
+                "task_type": "vqa_yes_no",
+                "image_path": "data/raw/sample.jpg",
+                "question": f"Question {index}?",
+                "reference_answer": "no",
+            }
+            for index in range(3)
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+
+    class FakeClient:
+        def __init__(self, config: Any, timeout: int = 120) -> None:
+            self.config = config
+            self.timeout = timeout
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            if "Question 1?" in kwargs["prompt"]:
+                raise RuntimeError("Model API request failed with status 429")
+            return {"choices": [{"message": {"content": "No"}}], "usage": {}}
+
+    monkeypatch.setattr("src.models.run_inference.OpenAICompatibleClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="sample_1"):
+        run_inference(
+            dataset_path=dataset,
+            prompt_path=prompt,
+            output_path=output,
+            provider="gemini_local",
+            run_id="run_1",
+            prompt_type="direct",
+            path_base=tmp_path,
+            limit=3,
+            overwrite=True,
+            concurrency=3,
+        )
+
+    rows = list(read_json_records(output))
+    assert [row["sample_id"] for row in rows] == ["sample_0", "sample_2"]
+
+
+
+def test_run_inference_record_failures_writes_failed_response(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    image_root = tmp_path / "data/raw"
+    image_root.mkdir(parents=True)
+    image = image_root / "sample.jpg"
+    image.write_bytes(b"abc")
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {
+                "sample_id": f"sample_{index}",
+                "dataset": "pope",
+                "task_type": "vqa_yes_no",
+                "image_path": "data/raw/sample.jpg",
+                "question": f"Question {index}?",
+                "reference_answer": "no",
+            }
+            for index in range(3)
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+
+    class FakeClient:
+        def __init__(self, config: Any, timeout: int = 120) -> None:
+            self.config = config
+            self.timeout = timeout
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            if "Question 1?" in kwargs["prompt"]:
+                raise RuntimeError("Model API request failed with status 429")
+            return {"choices": [{"message": {"content": "No"}}], "usage": {}}
+
+    monkeypatch.setattr("src.models.run_inference.OpenAICompatibleClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="incomplete or invalid"):
+        run_inference(
+            dataset_path=dataset,
+            prompt_path=prompt,
+            output_path=output,
+            provider="gemini_local",
+            run_id="run_1",
+            prompt_type="direct",
+            path_base=tmp_path,
+            limit=3,
+            overwrite=True,
+            concurrency=3,
+            record_failures=True,
+        )
+
+    rows = list(read_json_records(output))
+    assert [row["sample_id"] for row in rows] == ["sample_0", "sample_1", "sample_2"]
+    failed = rows[1]
+    assert failed["parsed"]["parse_status"] == "failed"
+    assert failed["inference_metadata"]["status"] == "failed"
+    assert "status 429" in failed["inference_metadata"]["error"]
+
+
+
+def test_run_inference_passes_request_timeout_to_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    image_root = tmp_path / "data/raw"
+    image_root.mkdir(parents=True)
+    image = image_root / "sample.jpg"
+    image.write_bytes(b"abc")
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {
+                "sample_id": "sample_0",
+                "dataset": "pope",
+                "task_type": "vqa_yes_no",
+                "image_path": "data/raw/sample.jpg",
+                "question": "Question?",
+                "reference_answer": "no",
+            }
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+    seen_timeouts = []
+
+    class FakeClient:
+        def __init__(self, config: Any, timeout: int = 120) -> None:
+            self.config = config
+            seen_timeouts.append(timeout)
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            return {"choices": [{"message": {"content": "No"}}], "usage": {}}
+
+    monkeypatch.setattr("src.models.run_inference.OpenAICompatibleClient", FakeClient)
+
+    run_inference(
+        dataset_path=dataset,
+        prompt_path=prompt,
+        output_path=output,
+        provider="gemini_local",
+        run_id="run_1",
+        prompt_type="direct",
+        path_base=tmp_path,
+        limit=1,
+        overwrite=True,
+        request_timeout_seconds=33,
+    )
+
+    assert seen_timeouts == [33]
+
+
+
+def test_run_inference_record_failures_writes_read_timeout_response(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    image_root = tmp_path / "data/raw"
+    image_root.mkdir(parents=True)
+    image = image_root / "sample.jpg"
+    image.write_bytes(b"abc")
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {
+                "sample_id": "sample_0",
+                "dataset": "mathvista",
+                "task_type": "visual_math_reasoning",
+                "image_path": "data/raw/sample.jpg",
+                "question": "Question?",
+                "reference_answer": "no",
+            }
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+
+    class FakeClient:
+        def __init__(self, config: Any, timeout: int = 120) -> None:
+            self.config = config
+            self.timeout = timeout
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("Read timed out. (read timeout=33)")
+
+    monkeypatch.setattr("src.models.run_inference.OpenAICompatibleClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="incomplete or invalid"):
+        run_inference(
+            dataset_path=dataset,
+            prompt_path=prompt,
+            output_path=output,
+            provider="gemini_local",
+            run_id="run_1",
+            prompt_type="direct",
+            path_base=tmp_path,
+            limit=1,
+            overwrite=True,
+            record_failures=True,
+            request_timeout_seconds=33,
+        )
+
+    rows = list(read_json_records(output))
+    assert rows[0]["inference_metadata"]["status"] == "failed"
+    assert "Read timed out" in rows[0]["inference_metadata"]["error"]
+
+
+
+@pytest.mark.parametrize(
+    "error_message",
+    [
+        "Model API request failed with status 500",
+        "ConnectionError: connection aborted",
+    ],
+)
+def test_run_inference_record_failures_writes_retryable_transport_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error_message: str
+):
+    image_root = tmp_path / "data/raw"
+    image_root.mkdir(parents=True)
+    image = image_root / "sample.jpg"
+    image.write_bytes(b"abc")
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {
+                "sample_id": "sample_0",
+                "dataset": "mathvista",
+                "task_type": "visual_math_reasoning",
+                "image_path": "data/raw/sample.jpg",
+                "question": "Question?",
+                "reference_answer": "no",
+            }
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+
+    class FakeClient:
+        def __init__(self, config: Any, timeout: int = 120) -> None:
+            self.config = config
+            self.timeout = timeout
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError(error_message)
+
+    monkeypatch.setattr("src.models.run_inference.OpenAICompatibleClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="incomplete or invalid"):
+        run_inference(
+            dataset_path=dataset,
+            prompt_path=prompt,
+            output_path=output,
+            provider="gemini_local",
+            run_id="run_1",
+            prompt_type="direct",
+            path_base=tmp_path,
+            limit=1,
+            overwrite=True,
+            record_failures=True,
+        )
+
+    rows = list(read_json_records(output))
+    assert rows[0]["inference_metadata"]["status"] == "failed"
+    assert error_message in rows[0]["inference_metadata"]["error"]
+
+
+
+def test_run_inference_record_failures_uses_wrapped_transport_error_type(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    image_root = tmp_path / "data/raw"
+    image_root.mkdir(parents=True)
+    image = image_root / "sample.jpg"
+    image.write_bytes(b"abc")
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {
+                "sample_id": "sample_0",
+                "dataset": "mathvista",
+                "task_type": "visual_math_reasoning",
+                "image_path": "data/raw/sample.jpg",
+                "question": "Question?",
+                "reference_answer": "no",
+            }
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+
+    class FakeClient:
+        def __init__(self, config: Any, timeout: int = 120) -> None:
+            self.config = config
+            self.timeout = timeout
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            raise requests.ConnectionError("temporary network failure")
+
+    monkeypatch.setattr("src.models.run_inference.OpenAICompatibleClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="incomplete or invalid"):
+        run_inference(
+            dataset_path=dataset,
+            prompt_path=prompt,
+            output_path=output,
+            provider="gemini_local",
+            run_id="run_1",
+            prompt_type="direct",
+            path_base=tmp_path,
+            limit=1,
+            overwrite=True,
+            record_failures=True,
+        )
+
+    rows = list(read_json_records(output))
+    assert rows[0]["inference_metadata"]["status"] == "failed"
+    assert "temporary network failure" in rows[0]["inference_metadata"]["error"]
+
+
+
+def test_run_inference_record_failures_does_not_record_non_rate_limit_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    image_root = tmp_path / "data/raw"
+    image_root.mkdir(parents=True)
+    image = image_root / "sample.jpg"
+    image.write_bytes(b"abc")
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {
+                "sample_id": "sample_0",
+                "dataset": "pope",
+                "task_type": "vqa_yes_no",
+                "image_path": "data/raw/sample.jpg",
+                "question": "Question?",
+                "reference_answer": "no",
+            }
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+
+    class FakeClient:
+        def __init__(self, config: Any, timeout: int = 120) -> None:
+            self.config = config
+            self.timeout = timeout
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("Missing API key environment variable: TEST_KEY")
+
+    monkeypatch.setattr("src.models.run_inference.OpenAICompatibleClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="Missing API key"):
+        run_inference(
+            dataset_path=dataset,
+            prompt_path=prompt,
+            output_path=output,
+            provider="gemini_local",
+            run_id="run_1",
+            prompt_type="direct",
+            path_base=tmp_path,
+            limit=1,
+            overwrite=True,
+            concurrency=1,
+            record_failures=True,
+        )
+
+    assert list(read_json_records(output)) == []
+
+
+
+def test_run_inference_concurrent_non_recordable_error_stops_submitting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    image_root = tmp_path / "data/raw"
+    image_root.mkdir(parents=True)
+    image = image_root / "sample.jpg"
+    image.write_bytes(b"abc")
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {
+                "sample_id": f"sample_{index}",
+                "dataset": "pope",
+                "task_type": "vqa_yes_no",
+                "image_path": "data/raw/sample.jpg",
+                "question": f"Question {index}?",
+                "reference_answer": "no",
+            }
+            for index in range(5)
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+    seen_prompts = []
+    barrier = threading.Barrier(2)
+
+    class FakeClient:
+        def __init__(self, config: Any, timeout: int = 120) -> None:
+            self.config = config
+            self.timeout = timeout
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            seen_prompts.append(kwargs["prompt"])
+            if "Question 0?" in kwargs["prompt"] or "Question 1?" in kwargs["prompt"]:
+                barrier.wait(timeout=5)
+            if "Question 1?" in kwargs["prompt"]:
+                raise RuntimeError("Missing API key environment variable: TEST_KEY")
+            return {"choices": [{"message": {"content": "No"}}], "usage": {}}
+
+    monkeypatch.setattr("src.models.run_inference.OpenAICompatibleClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="Missing API key"):
+        run_inference(
+            dataset_path=dataset,
+            prompt_path=prompt,
+            output_path=output,
+            provider="gemini_local",
+            run_id="run_1",
+            prompt_type="direct",
+            path_base=tmp_path,
+            limit=5,
+            overwrite=True,
+            concurrency=2,
+            record_failures=True,
+        )
+
+    assert len(seen_prompts) <= 2
+    assert [row["sample_id"] for row in read_json_records(output)] == ["sample_0"]
+
+
+
+def test_resume_groups_uses_existing_output_total_and_resume_true(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     dataset = tmp_path / "samples.jsonl"
@@ -377,7 +1010,7 @@ def test_resume_groups_uses_existing_output_prefix_and_resume_true(
         ],
     )
     prompt.write_text("Question: {question}", encoding="utf-8")
-    write_jsonl(output, [{"sample_id": "sample_0"}])
+    write_jsonl(output, [_valid_response_row("sample_0")])
     group = InferenceGroup(
         run_id="run_1",
         dataset_path=str(dataset),
@@ -401,22 +1034,251 @@ def test_resume_groups_uses_existing_output_prefix_and_resume_true(
             if index >= target_limit:
                 break
             if sample["sample_id"] not in existing:
-                rows.append({"sample_id": sample["sample_id"]})
+                rows.append(_valid_response_row(sample["sample_id"]))
         write_jsonl(output, rows)
 
     monkeypatch.setattr(
         "src.models.run_one_tenth_inference.run_inference", fake_run_inference
     )
 
-    resume_groups([group], chunk_size=1)
+    resume_groups(
+        [group], chunk_size=1, concurrency=7, request_timeout_seconds=33
+    )
 
     assert [call["limit"] for call in calls] == [2, 3]
     assert all(call["resume"] is True for call in calls)
+    assert all(call["concurrency"] == 7 for call in calls)
+    assert all(call["record_failures"] is True for call in calls)
+    assert all(call["request_timeout_seconds"] == 33 for call in calls)
     assert [row["sample_id"] for row in read_json_records(output)] == [
         "sample_0",
         "sample_1",
         "sample_2",
     ]
+
+
+
+def test_resume_groups_expands_by_total_when_prefix_has_gap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {"sample_id": f"sample_{index}"}
+            for index in range(5)
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+    write_jsonl(output, [_valid_response_row("sample_0"), _valid_response_row("sample_2")])
+    group = InferenceGroup(
+        run_id="run_1",
+        dataset_path=str(dataset),
+        prompt_path=str(prompt),
+        output_path=str(output),
+        provider="gemini_local",
+        limit=4,
+        max_tokens=128,
+        dataset="pope",
+        model="gemini",
+        prompt="direct",
+    )
+    calls = []
+
+    def fake_run_inference(**kwargs: Any) -> None:
+        calls.append(kwargs)
+        rows = list(read_json_records(output))
+        existing = {row["sample_id"] for row in rows}
+        target_limit = kwargs["limit"]
+        for index, sample in enumerate(read_json_records(dataset)):
+            if index >= target_limit:
+                break
+            if sample["sample_id"] not in existing:
+                rows.append(_valid_response_row(sample["sample_id"]))
+        write_jsonl(output, rows)
+
+    monkeypatch.setattr(
+        "src.models.run_one_tenth_inference.run_inference", fake_run_inference
+    )
+
+    resume_groups([group], chunk_size=2, concurrency=7)
+
+    assert [call["limit"] for call in calls] == [4]
+    assert [row["sample_id"] for row in read_json_records(output)] == [
+        "sample_0",
+        "sample_2",
+        "sample_1",
+        "sample_3",
+    ]
+
+
+
+def test_resume_groups_continues_after_chunk_error_with_progress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {"sample_id": f"sample_{index}"}
+            for index in range(4)
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+    write_jsonl(output, [_valid_response_row("sample_0")])
+    group = InferenceGroup(
+        run_id="run_1",
+        dataset_path=str(dataset),
+        prompt_path=str(prompt),
+        output_path=str(output),
+        provider="gemini_local",
+        limit=4,
+        max_tokens=128,
+        dataset="pope",
+        model="gemini",
+        prompt="direct",
+    )
+    calls = []
+
+    def fake_run_inference(**kwargs: Any) -> None:
+        calls.append(kwargs)
+        rows = list(read_json_records(output))
+        existing = {row["sample_id"] for row in rows}
+        target_limit = kwargs["limit"]
+        for index, sample in enumerate(read_json_records(dataset)):
+            if index >= target_limit:
+                break
+            if sample["sample_id"] not in existing:
+                rows.append(_valid_response_row(sample["sample_id"]))
+                break
+        write_jsonl(output, rows)
+        if len(calls) == 1:
+            raise RuntimeError("temporary chunk failure")
+
+    monkeypatch.setattr(
+        "src.models.run_one_tenth_inference.run_inference", fake_run_inference
+    )
+
+    resume_groups([group], chunk_size=2, concurrency=7)
+
+    assert [call["limit"] for call in calls] == [3, 4, 4]
+    assert [row["sample_id"] for row in read_json_records(output)] == [
+        "sample_0",
+        "sample_1",
+        "sample_2",
+        "sample_3",
+    ]
+
+
+
+def test_resume_groups_continues_other_groups_when_one_group_has_no_progress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    dataset_a = tmp_path / "samples_a.jsonl"
+    dataset_b = tmp_path / "samples_b.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output_a = tmp_path / "responses_a.jsonl"
+    output_b = tmp_path / "responses_b.jsonl"
+    write_jsonl(dataset_a, [{"sample_id": "a_0"}])
+    write_jsonl(dataset_b, [{"sample_id": "b_0"}])
+    prompt.write_text("Question: {question}", encoding="utf-8")
+    group_a = InferenceGroup(
+        run_id="run_a",
+        dataset_path=str(dataset_a),
+        prompt_path=str(prompt),
+        output_path=str(output_a),
+        provider="gemini_local",
+        limit=1,
+        max_tokens=128,
+        dataset="pope",
+        model="gemini",
+        prompt="direct",
+    )
+    group_b = InferenceGroup(
+        run_id="run_b",
+        dataset_path=str(dataset_b),
+        prompt_path=str(prompt),
+        output_path=str(output_b),
+        provider="gemini_local",
+        limit=1,
+        max_tokens=128,
+        dataset="pope",
+        model="gemini",
+        prompt="direct",
+    )
+    calls = []
+
+    def fake_run_inference(**kwargs: Any) -> None:
+        calls.append(kwargs["run_id"])
+        if kwargs["run_id"] == "run_b":
+            write_jsonl(output_b, [_valid_response_row("b_0")])
+
+    monkeypatch.setattr(
+        "src.models.run_one_tenth_inference.run_inference", fake_run_inference
+    )
+
+    with pytest.raises(RuntimeError, match="Resume stalled"):
+        resume_groups([group_a, group_b], chunk_size=1, concurrency=7, max_chunk_attempts=1)
+
+    assert calls == ["run_a", "run_b"]
+    assert count_completed_target_samples(group_b) == 1
+
+
+
+def test_resume_groups_retries_when_chunk_only_records_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    dataset = tmp_path / "samples.jsonl"
+    prompt = tmp_path / "direct_test.txt"
+    output = tmp_path / "responses.jsonl"
+    write_jsonl(
+        dataset,
+        [
+            {"sample_id": "sample_0"},
+        ],
+    )
+    prompt.write_text("Question: {question}", encoding="utf-8")
+    group = InferenceGroup(
+        run_id="run_1",
+        dataset_path=str(dataset),
+        prompt_path=str(prompt),
+        output_path=str(output),
+        provider="gemini_local",
+        limit=1,
+        max_tokens=128,
+        dataset="pope",
+        model="gemini",
+        prompt="direct",
+    )
+    calls = []
+
+    def fake_run_inference(**kwargs: Any) -> None:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            write_jsonl(
+                output,
+                [
+                    {
+                        "sample_id": "sample_0",
+                        "inference_metadata": {"status": "failed"},
+                    }
+                ],
+            )
+            return
+        write_jsonl(output, [_valid_response_row("sample_0")])
+
+    monkeypatch.setattr(
+        "src.models.run_one_tenth_inference.run_inference", fake_run_inference
+    )
+
+    resume_groups([group], chunk_size=1, concurrency=7, max_chunk_attempts=2)
+
+    assert len(calls) == 2
+    assert count_completed_target_samples(group) == 1
 
 
 
@@ -458,14 +1320,19 @@ def test_run_inference_resume_limit_does_not_process_beyond_target(
                 "prompt_version": "v1",
                 "raw_response": "No",
                 "parsed": {"final_answer": "No", "parse_status": "ok"},
-                "inference_metadata": {},
+                "inference_metadata": {
+                    "provider": "gemini_local",
+                    "max_tokens": 512,
+                    "temperature": 0,
+                },
             }
         ],
     )
 
     class UnexpectedClient:
-        def __init__(self, config: Any) -> None:
+        def __init__(self, config: Any, timeout: int = 120) -> None:
             self.config = config
+            self.timeout = timeout
 
         def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
             raise AssertionError("resume should not process samples outside limit")
@@ -539,10 +1406,14 @@ def test_client_does_not_retry_bad_request(monkeypatch: pytest.MonkeyPatch):
 
 def test_provider_configs():
     gemini = get_provider_config("gemini_local")
+    gpt54 = get_provider_config("gpt54_local")
     instruct = get_provider_config("openrouter_qwen3_vl_instruct")
     thinking = get_provider_config("openrouter_qwen3_vl_thinking")
 
     assert gemini.default_model == "gemini-2.5-flash"
+    assert gpt54.default_model == "gpt-5.4-mini"
+    assert gpt54.api_key_env == "CHATGPT_LOCAL_KEY"
+    assert gpt54.base_url_env == "GPT54_LOCAL_BASE_URL"
     assert instruct.base_url == "https://openrouter.ai/api/v1"
     assert instruct.api_key_env == "OPENROUTER_API_KEY"
     assert instruct.default_model == "qwen/qwen3-vl-8b-instruct"

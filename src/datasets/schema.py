@@ -1,3 +1,5 @@
+"""实验样本、模型回答和 detector 结果的统一 JSONL 数据结构。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -19,6 +21,8 @@ _CONFIDENCE_VALUES = {"high", "medium", "low"}
 
 @dataclass(frozen=True)
 class TaxonomyLabel:
+    """Detector 输出的粗粒度和细粒度幻觉类型标签。"""
+
     coarse: CoarseTaxonomy = "None"
     fine: FineTaxonomy = "None"
 
@@ -43,6 +47,8 @@ class TaxonomyLabel:
 
 @dataclass(frozen=True)
 class EvalSample:
+    """评测样本的规范格式，承载题目、图片路径和参考答案。"""
+
     sample_id: str
     dataset: DatasetName
     task_type: str
@@ -89,6 +95,8 @@ class EvalSample:
 
 @dataclass(frozen=True)
 class ParsedResponse:
+    """从模型原始回答中解析出的视觉证据、推理过程和最终答案。"""
+
     visual_evidence: str = ""
     reasoning: str = ""
     final_answer: str = ""
@@ -119,6 +127,8 @@ class ParsedResponse:
 
 @dataclass(frozen=True)
 class ModelResponse:
+    """一次模型回答的完整记录，用于后续 detector 和结果复用校验。"""
+
     run_id: str
     sample_id: str
     dataset: DatasetName
@@ -169,6 +179,8 @@ class ModelResponse:
 
 @dataclass(frozen=True)
 class DetectorResult:
+    """zero-shot judge 等 detector 对单条模型回答的结构化判定结果。"""
+
     run_id: str
     sample_id: str
     model_response_id: str

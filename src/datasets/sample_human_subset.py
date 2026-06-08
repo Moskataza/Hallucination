@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import random
 from collections import defaultdict
-from pathlib import Path
 from typing import Any
 
 from src.datasets.jsonl import read_jsonl, write_jsonl

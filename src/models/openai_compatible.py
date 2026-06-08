@@ -1,3 +1,5 @@
+"""OpenAI-compatible 多模态接口封装，统一处理 provider、图片载入和重试。"""
+
 from __future__ import annotations
 
 import base64
@@ -17,11 +19,14 @@ _DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 @dataclass(frozen=True)
 class ProviderConfig:
+    """一个 OpenAI-compatible provider 的地址、密钥环境变量和默认模型。"""
+
     name: str
     base_url: str
     api_key_env: str
     default_model: str
     model_type: Literal["closed", "open", "unknown"]
+    base_url_env: str | None = None
 
 
 PROVIDERS: dict[str, ProviderConfig] = {
@@ -38,6 +43,14 @@ PROVIDERS: dict[str, ProviderConfig] = {
         api_key_env="GEMINI_LOCAL_API_KEY",
         default_model="gemini-2.5-flash",
         model_type="closed",
+    ),
+    "gpt54_local": ProviderConfig(
+        name="gpt54_local",
+        base_url="http://127.0.0.1:8317/v1",
+        api_key_env="CHATGPT_LOCAL_KEY",
+        default_model="gpt-5.4-mini",
+        model_type="closed",
+        base_url_env="GPT54_LOCAL_BASE_URL",
     ),
     "openrouter_qwen3_vl_instruct": ProviderConfig(
         name="openrouter_qwen3_vl_instruct",
@@ -82,6 +95,8 @@ class OpenAICompatibleClient:
         native_reasoning: bool = False,
         reasoning_max_tokens: int | None = None,
     ) -> dict[str, Any]:
+        """发送单次多模态 chat completion 请求。"""
+
         api_key = os.environ.get(self.config.api_key_env)
         if not api_key:
             raise RuntimeError(
@@ -100,8 +115,13 @@ class OpenAICompatibleClient:
             reasoning_max_tokens=reasoning_max_tokens,
             provider_name=self.config.name,
         )
+        base_url = (
+            os.environ.get(self.config.base_url_env)
+            if self.config.base_url_env is not None
+            else None
+        ) or self.config.base_url
         response = self._post_with_retries(
-            f"{self.config.base_url.rstrip('/')}/chat/completions",
+            f"{base_url.rstrip('/')}/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
@@ -113,6 +133,8 @@ class OpenAICompatibleClient:
     def _post_with_retries(
         self, url: str, *, headers: dict[str, str], payload: dict[str, Any]
     ) -> requests.Response:
+        """对超时、连接错误、429 和 5xx 做有限重试。"""
+
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
@@ -268,6 +290,8 @@ def image_to_data_url(
     allowed_root: str | Path | None = None,
     max_bytes: int = _DEFAULT_MAX_IMAGE_BYTES,
 ) -> str:
+    """校验图片路径和大小后转成 OpenAI-compatible image_url data URL。"""
+
     path = Path(image_path).resolve()
     if allowed_root is not None:
         root = Path(allowed_root).resolve()

@@ -69,9 +69,11 @@ Important distinctions:
 - Incorrect answer alone is not necessarily hallucination.
 - Correct answer can still contain hallucination if evidence or reasoning is unsupported.
 - Extra claims that are wrong or unsupported still count as hallucinations.
-- If Reference Answer is UNAVAILABLE, set answer_correct to null, but still judge claim support.
+- If Reference Answer is UNAVAILABLE or empty, set answer_correct to null because answer correctness cannot be judged from ground truth. Still judge claim support and always set is_hallucination to true or false.
+- If the model response abstains, says the image is insufficient, or gives no final answer, do not treat that as hallucination by itself. Mark INC only when the response fails a required answer/reasoning requirement; otherwise use primary_label None and is_hallucination false if there are no unsupported claims.
+- Do not use null for is_hallucination. Even when answer_correct is null, decide whether the response contains unsupported/contradicted/unverifiable claims and output true or false.
 - For POPE, reference_answer=no and final_answer=yes suggests a possible object-claim contradiction, but assign OBJ only when the response asserts object presence that is unsupported or contradicted by the image evidence.
-- For MathVista, wrong numeric/math answer is not automatically hallucination; distinguish visual misreading from invalid reasoning.
+- For MathVista, wrong numeric/math answer is not automatically hallucination; distinguish visual misreading from invalid reasoning. If the reference answer is unavailable, do not penalize final-answer correctness; only judge whether the response's visual and reasoning claims are supported.
 
 Return STRICT JSON only. Do not use markdown or code fences.
 
@@ -103,7 +105,7 @@ Schema:
 
 Allowed values:
 - answer_correct: true, false, or null
-- is_hallucination: true, false, or null
+- is_hallucination: true or false only; never null
 - label_order: exactly ["OBJ", "ATT", "SPA", "IR", "CI", "INC", "SO"]
 - hallucination_vector: exactly seven integers, each 0 or 1
 - hallucination_labels: subset of OBJ, ATT, SPA, IR, CI, INC, SO
