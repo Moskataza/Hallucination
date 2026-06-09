@@ -127,6 +127,23 @@ def test_zero_shot_prompt_uses_reference_answer_only_as_auxiliary_context():
     assert "Hallucination labels must be based on unsupported" in prompt
 
 
+def test_zero_shot_prompt_defines_updated_taxonomy():
+    prompt = render_zero_shot_judge_prompt(
+        _sample(),
+        _response(),
+        taxonomy_definition=Path("prompts/judge/taxonomy_definition.txt").read_text(
+            encoding="utf-8"
+        ),
+    )
+
+    assert "image facts, the question requirements" in prompt
+    assert "truncated response with no explicit final answer" in prompt
+    assert "CI: Context Inconsistency" in prompt
+    assert "INC: Internal Inconsistency" in prompt
+    assert "SO: Semantic Over-attribution / Subjective Opinion" in prompt
+    assert "answer_claim alone is not a hallucination label" in prompt
+
+
 def test_parse_judge_output_recovers_fenced_json_and_normalizes_details():
     raw = "```json\n" + json.dumps(_judge_payload(), ensure_ascii=False) + "\n```"
 
@@ -164,8 +181,8 @@ def test_parse_judge_output_recomputes_vector_from_claim_checks():
         )
     )
 
-    assert details["hallucination_labels"] == ["ATT", "CI"]
-    assert details["hallucination_vector"] == [0, 1, 0, 0, 1, 0, 0]
+    assert details["hallucination_labels"] == ["ATT", "SO"]
+    assert details["hallucination_vector"] == [0, 1, 0, 0, 0, 0, 1]
     assert details["primary_label"] == "ATT"
     assert details["coarse_labels"] == [
         "Factual Hallucination",
@@ -285,6 +302,35 @@ def test_parse_judge_output_does_not_derive_hallucination_from_answer_claim():
     assert details["claim_checks"][0]["fine_label"] == "None"
 
 
+def test_parse_judge_output_preserves_answer_claim_consistency_exceptions():
+    details = parse_judge_output(
+        json.dumps(
+            _judge_payload(
+                hallucination_vector=[0, 0, 0, 0, 0, 0, 0],
+                hallucination_labels=[],
+                primary_label="None",
+                claim_checks=[
+                    {
+                        "claim": "The reasoning supports A, but the final answer is B.",
+                        "claim_type": "answer_claim",
+                        "support_status": "contradicted",
+                        "fine_label": "INC",
+                    },
+                    {
+                        "claim": "The answer violates the required option format.",
+                        "claim_type": "answer_claim",
+                        "support_status": "contradicted",
+                        "fine_label": "CI",
+                    },
+                ],
+            )
+        )
+    )
+
+    assert details["hallucination_labels"] == ["CI", "INC"]
+    assert details["hallucination_vector"] == [0, 0, 0, 0, 1, 1, 0]
+
+
 def test_parse_judge_output_derives_internal_inconsistency_from_claim_type():
     details = parse_judge_output(
         json.dumps(
@@ -387,6 +433,56 @@ def test_judge_response_attaches_image_and_returns_detector_result(tmp_path: Pat
     )
     assert client.calls[0]["allowed_image_root"] == (tmp_path / "data/raw").resolve()
     assert client.calls[0]["model"] == "gpt-5.4-mini"
+    assert client.calls[0]["response_format"]["type"] == "json_schema"
+    schema = client.calls[0]["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["is_hallucination"] == {"type": "boolean"}
+    assert schema["additionalProperties"] is False
+
+
+def test_judge_response_falls_back_when_response_format_is_unsupported(tmp_path: Path):
+    raw = json.dumps(_judge_payload())
+
+    class FallbackClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            if kwargs.get("response_format") is not None:
+                raise RuntimeError("Unsupported parameter: response_format")
+            return {"choices": [{"message": {"content": raw}}]}
+
+    client = FallbackClient()
+
+    result = judge_response(
+        _sample("data/raw/pope/sample.jpg"),
+        _response(),
+        client=client,
+        run_id="judge_run_1",
+        path_base=tmp_path,
+        image_root="data/raw",
+    )
+
+    assert result.is_hallucination is True
+    assert len(client.calls) == 2
+    assert client.calls[0]["response_format"]["type"] == "json_schema"
+    assert "response_format" not in client.calls[1]
+
+
+def test_judge_response_does_not_fallback_for_schema_validation_errors(tmp_path: Path):
+    class SchemaErrorClient:
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("Invalid json_schema: additionalProperties is required")
+
+    with pytest.raises(RuntimeError, match="Invalid json_schema"):
+        judge_response(
+            _sample("data/raw/pope/sample.jpg"),
+            _response(),
+            client=SchemaErrorClient(),
+            run_id="judge_run_1",
+            path_base=tmp_path,
+            image_root="data/raw",
+        )
 
 
 def test_detect_file_requires_resume_or_overwrite(tmp_path: Path):
@@ -425,7 +521,10 @@ def test_detect_file_resume_skips_existing_response(
                 "dataset": "pope",
                 "model": "qwen/qwen3-vl-8b-instruct",
                 "prompt_type": "evidence_grounded_cot",
-                "details": {**_judge_payload(), "judge_provider": "openrouter_qwen3_vl_instruct"},
+                "details": {
+                    **_judge_payload(),
+                    "judge_provider": "openrouter_qwen3_vl_instruct",
+                },
             }
         ],
     )
@@ -448,7 +547,6 @@ def test_detect_file_resume_skips_existing_response(
     rows = list(read_jsonl(output))
     assert len(rows) == 1
     assert rows[0]["explanation"] == "already judged"
-
 
 
 def test_detect_file_resume_retries_judge_failure_fallback(
@@ -511,6 +609,136 @@ def test_detect_file_resume_retries_judge_failure_fallback(
     assert rows[0]["details"]["primary_label"] == "OBJ"
 
 
+def test_detect_file_does_not_judge_token_limit_truncated_model_response(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
+    truncated_response = _response().to_dict()
+    truncated_response["raw_response"] = (
+        "Visual Evidence: I see a dog.\nFinal Answer: Yes"
+    )
+    truncated_response["parsed"] = {
+        "visual_evidence": "I see a dog.",
+        "reasoning": "",
+        "final_answer": "Yes",
+        "parse_status": "ok",
+    }
+    truncated_response["inference_metadata"] = {"finish_reason": "length"}
+    write_jsonl(responses, [truncated_response])
+
+    class UnexpectedClient:
+        def __init__(self, config: Any) -> None:
+            raise AssertionError(
+                "judge client should not be created for truncated responses"
+            )
+
+    monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", UnexpectedClient)
+
+    with pytest.raises(RuntimeError, match="truncated by the token limit"):
+        zero_shot_judge.detect_file(
+            samples,
+            responses,
+            output,
+            provider="openrouter_qwen3_vl_instruct",
+            run_id="judge_run_1",
+            overwrite=True,
+        )
+
+    assert list(read_jsonl(output)) == []
+
+
+def test_detect_file_resume_rejects_stale_detector_row_for_invalid_response(
+    tmp_path: Path,
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
+    truncated_response = _response().to_dict()
+    truncated_response["inference_metadata"] = {"finish_reason": "length"}
+    write_jsonl(responses, [truncated_response])
+    write_jsonl(
+        output,
+        [
+            {
+                "run_id": "judge_run_1",
+                "sample_id": "pope_1",
+                "model_response_id": "model_run_1:pope_1",
+                "detector": "response_claim_zero_shot_judge",
+                "answer_correct": False,
+                "is_hallucination": True,
+                "taxonomy": {"coarse": "Factual", "fine": "OBJ"},
+                "unsupported_visual_claim": True,
+                "confidence": "high",
+                "explanation": "stale detector row",
+                "raw_judge_response": "{}",
+                "dataset": "pope",
+                "model": "qwen/qwen3-vl-8b-instruct",
+                "prompt_type": "evidence_grounded_cot",
+                "details": {
+                    **_judge_payload(),
+                    "judge_provider": "openrouter_qwen3_vl_instruct",
+                },
+            }
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="invalid model response"):
+        zero_shot_judge.detect_file(
+            samples,
+            responses,
+            output,
+            provider="openrouter_qwen3_vl_instruct",
+            run_id="judge_run_1",
+            resume=True,
+        )
+
+    assert list(read_jsonl(output)) == []
+
+
+def test_detect_file_does_not_judge_incomplete_model_response(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
+    incomplete_response = _response().to_dict()
+    incomplete_response["raw_response"] = (
+        "Visual Evidence: The shape appears to be an L.\n"
+        "Reasoning: Rechecking the L rotation"
+    )
+    incomplete_response["parsed"] = {
+        "visual_evidence": "The shape appears to be an L.",
+        "reasoning": "Rechecking the L rotation",
+        "final_answer": "Reasoning: Rechecking the L rotation",
+        "parse_status": "fallback",
+    }
+    write_jsonl(responses, [incomplete_response])
+
+    class UnexpectedClient:
+        def __init__(self, config: Any) -> None:
+            raise AssertionError(
+                "judge client should not be created for incomplete responses"
+            )
+
+    monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", UnexpectedClient)
+
+    with pytest.raises(RuntimeError, match="missing an explicit Final Answer"):
+        zero_shot_judge.detect_file(
+            samples,
+            responses,
+            output,
+            provider="openrouter_qwen3_vl_instruct",
+            run_id="judge_run_1",
+            overwrite=True,
+        )
+
+    assert list(read_jsonl(output)) == []
+
 
 def test_detect_file_does_not_write_null_row_for_failed_model_response(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -530,11 +758,13 @@ def test_detect_file_does_not_write_null_row_for_failed_model_response(
 
     class UnexpectedClient:
         def __init__(self, config: Any) -> None:
-            raise AssertionError("judge client should not be created for failed responses")
+            raise AssertionError(
+                "judge client should not be created for failed responses"
+            )
 
     monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", UnexpectedClient)
 
-    with pytest.raises(RuntimeError, match="failed model response"):
+    with pytest.raises(RuntimeError, match="invalid model response"):
         zero_shot_judge.detect_file(
             samples,
             responses,
@@ -548,7 +778,6 @@ def test_detect_file_does_not_write_null_row_for_failed_model_response(
     assert list(read_jsonl(output)) == []
 
 
-
 def test_detect_file_does_not_write_null_row_for_judge_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -557,7 +786,9 @@ def test_detect_file_does_not_write_null_row_for_judge_failure(
     output = tmp_path / "judge.jsonl"
     write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
     response = _response().to_dict()
-    response["raw_response"] = "Visual Evidence: trigger judge failure.\nFinal Answer: Yes"
+    response["raw_response"] = (
+        "Visual Evidence: trigger judge failure.\nFinal Answer: Yes"
+    )
     write_jsonl(responses, [response])
 
     class FailingClient:
@@ -580,7 +811,6 @@ def test_detect_file_does_not_write_null_row_for_judge_failure(
         )
 
     assert list(read_jsonl(output)) == []
-
 
 
 def test_detect_file_retries_api_failure(
@@ -617,7 +847,6 @@ def test_detect_file_retries_api_failure(
     assert len(rows) == 1
     assert rows[0]["answer_correct"] is False
     assert rows[0]["taxonomy"] == {"coarse": "Factual", "fine": "OBJ"}
-
 
 
 def test_detect_file_retries_null_required_judge_fields(
@@ -670,7 +899,6 @@ def test_detect_file_retries_null_required_judge_fields(
     assert rows[0]["taxonomy"] == {"coarse": "Factual", "fine": "OBJ"}
 
 
-
 def test_detect_file_retries_null_hallucination_even_with_answer_correct(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -719,7 +947,6 @@ def test_detect_file_retries_null_hallucination_even_with_answer_correct(
     assert rows[0]["answer_correct"] is False
     assert rows[0]["is_hallucination"] is True
     assert rows[0]["details"]["raw_is_hallucination"] is True
-
 
 
 def test_detect_file_allows_null_answer_correct_for_unavailable_reference(
@@ -789,7 +1016,6 @@ def test_detect_file_allows_null_answer_correct_for_unavailable_reference(
     assert rows[0]["taxonomy"] == {"coarse": "None", "fine": "None"}
 
 
-
 def test_detect_file_retries_malformed_judge_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -826,7 +1052,6 @@ def test_detect_file_retries_malformed_judge_output(
     assert rows[0]["taxonomy"] == {"coarse": "Factual", "fine": "OBJ"}
 
 
-
 def test_detect_file_concurrent_writes_results_in_response_order(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -843,7 +1068,11 @@ def test_detect_file_concurrent_writes_results_in_response_order(
     )
     write_jsonl(
         responses,
-        [_response("pope_1").to_dict(), _response("pope_2").to_dict(), _response("pope_3").to_dict()],
+        [
+            _response("pope_1").to_dict(),
+            _response("pope_2").to_dict(),
+            _response("pope_3").to_dict(),
+        ],
     )
 
     class FakeClient:
@@ -873,7 +1102,6 @@ def test_detect_file_concurrent_writes_results_in_response_order(
     ]
 
 
-
 def test_detect_file_concurrent_failure_persists_only_successful_results(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -889,7 +1117,9 @@ def test_detect_file_concurrent_failure_persists_only_successful_results(
         ],
     )
     second_response = _response("pope_2").to_dict()
-    second_response["raw_response"] = "Visual Evidence: trigger judge failure.\nFinal Answer: Yes"
+    second_response["raw_response"] = (
+        "Visual Evidence: trigger judge failure.\nFinal Answer: Yes"
+    )
     write_jsonl(
         responses,
         [_response("pope_1").to_dict(), second_response, _response("pope_3").to_dict()],

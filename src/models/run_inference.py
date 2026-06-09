@@ -51,6 +51,7 @@ def run_inference(
     record_failures: bool = False,
     request_timeout_seconds: int = 120,
     request_max_retries: int = 2,
+    resume_provider_model_agnostic: bool = False,
 ) -> None:
     """生成目标样本的模型回答，已存在且兼容的行会在 resume 时跳过。"""
 
@@ -80,6 +81,7 @@ def run_inference(
         provider=provider,
         max_tokens=max_tokens,
         temperature=temperature,
+        provider_model_agnostic=resume_provider_model_agnostic,
     )
     allowed_image_root = (Path(path_base) / image_root).resolve()
 
@@ -97,6 +99,7 @@ def run_inference(
             provider=provider,
             max_tokens=max_tokens,
             temperature=temperature,
+            provider_model_agnostic=resume_provider_model_agnostic,
         )
         return
 
@@ -164,6 +167,7 @@ def run_inference(
             provider=provider,
             max_tokens=max_tokens,
             temperature=temperature,
+            provider_model_agnostic=resume_provider_model_agnostic,
         )
         return
 
@@ -203,6 +207,7 @@ def run_inference(
         provider=provider,
         max_tokens=max_tokens,
         temperature=temperature,
+        provider_model_agnostic=resume_provider_model_agnostic,
     )
 
 
@@ -335,7 +340,8 @@ def _should_record_failure(record_failures: bool, error: Exception) -> bool:
     text = str(error).lower()
     return (
         "status 429" in text
-        or "429" in text and "rate" in text
+        or "429" in text
+        and "rate" in text
         or "status 5" in text
         or "read timed out" in text
         or "timed out" in text
@@ -344,7 +350,6 @@ def _should_record_failure(record_failures: bool, error: Exception) -> bool:
         or "connection aborted" in text
         or "connection refused" in text
     )
-
 
 
 def _build_failed_response_row(
@@ -382,7 +387,6 @@ def _build_failed_response_row(
     return response.to_dict()
 
 
-
 def _collect_pending_samples(
     *,
     dataset_path: str | Path,
@@ -409,7 +413,6 @@ def _sample_dataset(dataset_path: str | Path) -> str:
     return str(rows[0].get("dataset", ""))
 
 
-
 def _sample_indices(dataset_path: str | Path) -> dict[str, int]:
     return {
         str(sample["sample_id"]): index
@@ -427,18 +430,37 @@ def _target_sample_ids(
     }
 
 
-def _is_invalid_response_row(row: dict[str, Any]) -> bool:
+def model_response_invalid_reason(row: dict[str, Any]) -> str | None:
     metadata = row.get("inference_metadata")
     if not isinstance(metadata, dict):
         metadata = {}
     parsed = row.get("parsed")
     if not isinstance(parsed, dict):
         parsed = {}
-    return (
-        metadata.get("status") == "failed"
-        or parsed.get("parse_status") == "failed"
-        or not str(row.get("raw_response", "")).strip()
-    )
+
+    if metadata.get("status") == "failed":
+        return "model inference failed"
+    finish_reason = str(metadata.get("finish_reason", "")).strip().lower()
+    if finish_reason in {"length", "max_tokens", "token_limit"}:
+        return "model output was truncated by the token limit"
+    if not str(row.get("raw_response", "")).strip():
+        return "raw response is empty"
+    prompt_type = str(row.get("prompt_type", ""))
+    if parsed.get("parse_status") != "ok" and prompt_type == "evidence_grounded_cot":
+        reparsed = parse_response(str(row.get("raw_response", "")), prompt_type)
+        if reparsed.parse_status == "ok":
+            parsed = reparsed.to_dict()
+    if parsed.get("parse_status") == "failed":
+        return "response parsing failed"
+    if not str(parsed.get("final_answer", "")).strip():
+        return "parsed final answer is empty"
+    if prompt_type == "evidence_grounded_cot" and parsed.get("parse_status") != "ok":
+        return "CoT response is missing an explicit Final Answer section"
+    return None
+
+
+def _is_invalid_response_row(row: dict[str, Any]) -> bool:
+    return model_response_invalid_reason(row) is not None
 
 
 def _validate_completed_output(
@@ -454,6 +476,7 @@ def _validate_completed_output(
     provider: str,
     max_tokens: int,
     temperature: float,
+    provider_model_agnostic: bool = False,
 ) -> None:
     rows = list(read_json_records(output)) if output.exists() else []
     rows_by_sample = {str(row.get("sample_id", "")): row for row in rows}
@@ -462,7 +485,7 @@ def _validate_completed_output(
         sample_id
         for sample_id in target_sample_ids & set(rows_by_sample)
         if _is_invalid_response_row(rows_by_sample[sample_id])
-        or not is_response_row_compatible(
+        or not _is_compatible_existing_response_row(
             rows_by_sample[sample_id],
             run_id=run_id,
             dataset=dataset,
@@ -473,6 +496,7 @@ def _validate_completed_output(
             provider=provider,
             max_tokens=max_tokens,
             temperature=temperature,
+            provider_model_agnostic=provider_model_agnostic,
         )
     )
     if missing or invalid:
@@ -481,16 +505,19 @@ def _validate_completed_output(
             parts.append(f"missing={missing[:10]}")
         if invalid:
             parts.append(f"invalid={invalid[:10]}")
-        raise RuntimeError("Model inference output is incomplete or invalid: " + "; ".join(parts))
+        raise RuntimeError(
+            "Model inference output is incomplete or invalid: " + "; ".join(parts)
+        )
 
 
 def _write_indexed_rows(
     output: Path, indexed_rows: list[tuple[int, dict[str, Any]]]
 ) -> None:
-    rows_by_sample_id = {str(row["sample_id"]): (index, row) for index, row in indexed_rows}
+    rows_by_sample_id = {
+        str(row["sample_id"]): (index, row) for index, row in indexed_rows
+    }
     rows = [
-        row
-        for _, row in sorted(rows_by_sample_id.values(), key=lambda item: item[0])
+        row for _, row in sorted(rows_by_sample_id.values(), key=lambda item: item[0])
     ]
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -510,6 +537,16 @@ def _write_indexed_rows(
     temp_path.replace(output)
 
 
+def _extract_finish_reason(api_response: dict[str, Any]) -> str:
+    choices = api_response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        return ""
+    return str(first_choice.get("finish_reason", ""))
+
+
 def _build_client(
     provider_config: Any,
     *,
@@ -524,10 +561,11 @@ def _build_client(
         )
     except TypeError:
         try:
-            return OpenAICompatibleClient(provider_config, timeout=request_timeout_seconds)
+            return OpenAICompatibleClient(
+                provider_config, timeout=request_timeout_seconds
+            )
         except TypeError:
             return OpenAICompatibleClient(provider_config)
-
 
 
 def _infer_sample(
@@ -571,16 +609,21 @@ def _infer_sample(
             reasoning_max_tokens=reasoning_max_tokens,
         )
     except Exception as exc:
-        raise RuntimeError(f"Failed inference for sample_id={sample_id}: {exc}") from exc
+        raise RuntimeError(
+            f"Failed inference for sample_id={sample_id}: {exc}"
+        ) from exc
 
     raw_response = extract_message_text(api_response)
     native_reasoning_payload = extract_native_reasoning(api_response)
+    finish_reason = _extract_finish_reason(api_response)
     inference_metadata: dict[str, Any] = {
         "provider": provider,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "api_usage": api_response.get("usage", {}),
     }
+    if finish_reason:
+        inference_metadata["finish_reason"] = finish_reason
     if native_reasoning:
         inference_metadata["native_reasoning_enabled"] = True
         inference_metadata["native_reasoning"] = native_reasoning_payload
@@ -599,7 +642,6 @@ def _infer_sample(
         inference_metadata=inference_metadata,
     )
     return response.to_dict()
-
 
 
 def resolve_prompt_type(
@@ -671,6 +713,7 @@ def _prepare_output_rows(
     provider: str | None = None,
     max_tokens: int | None = None,
     temperature: float | None = None,
+    provider_model_agnostic: bool = False,
 ) -> tuple[list[dict[str, Any]], set[str]]:
     if overwrite:
         write_jsonl(output_path, [])
@@ -696,6 +739,7 @@ def _prepare_output_rows(
             provider=provider,
             max_tokens=max_tokens,
             temperature=temperature,
+            provider_model_agnostic=provider_model_agnostic,
         )
     ]
     _write_indexed_rows(
@@ -717,7 +761,17 @@ def _is_compatible_existing_response_row(
     provider: str | None,
     max_tokens: int | None,
     temperature: float | None,
+    provider_model_agnostic: bool = False,
 ) -> bool:
+    if provider_model_agnostic:
+        return _matches_response_row_without_provider_model(
+            row,
+            run_id=run_id,
+            dataset=dataset,
+            prompt_type=prompt_type,
+            prompt_version=prompt_version,
+            temperature=temperature,
+        )
     if None in {
         run_id,
         dataset,
@@ -742,6 +796,31 @@ def _is_compatible_existing_response_row(
         max_tokens=max_tokens,
         temperature=temperature,
     )
+
+
+def _matches_response_row_without_provider_model(
+    row: dict[str, Any],
+    *,
+    run_id: str | None,
+    dataset: str | None,
+    prompt_type: PromptType | None,
+    prompt_version: str | None,
+    temperature: float | None,
+) -> bool:
+    if None in {run_id, dataset, prompt_type, prompt_version, temperature}:
+        return True
+    if row.get("run_id") != run_id:
+        return False
+    if row.get("dataset") != dataset:
+        return False
+    if row.get("prompt_type") != prompt_type:
+        return False
+    if row.get("prompt_version") != prompt_version:
+        return False
+    metadata = row.get("inference_metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return metadata.get("temperature") == temperature
 
 
 def main() -> None:

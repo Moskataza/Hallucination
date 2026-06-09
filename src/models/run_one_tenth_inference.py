@@ -137,6 +137,7 @@ def resume_groups(
                     record_failures=True,
                     request_timeout_seconds=request_timeout_seconds,
                     request_max_retries=request_max_retries,
+                    resume_provider_model_agnostic=group.model == "qwen",
                 )
             except Exception as exc:
                 run_error = exc

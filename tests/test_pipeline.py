@@ -494,6 +494,78 @@ def test_detector_resume_refuses_incompatible_registered_responses(
         resume_detector_groups([group], chunk_size=1)
 
 
+def test_detector_resume_accepts_qwen_provider_model_variants(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample_row("sample_0")])
+    write_jsonl(
+        responses,
+        [
+            _response_row(
+                sample_id="sample_0",
+                run_id="one_tenth_mathvista_qwen_direct_v1",
+                model="qwen/qwen3-vl-8b-instruct",
+                model_type="open",
+                provider="openrouter_qwen3_vl_instruct",
+                max_tokens=1024,
+            )
+        ],
+    )
+    group = DetectorGroup(
+        run_id="judge_run",
+        samples_path=str(samples),
+        responses_path=str(responses),
+        output_path=str(output),
+        provider="gpt54_local",
+        detector="zero_shot",
+        dataset="mathvista",
+        model="qwen",
+        prompt="direct",
+        experiment="tmp",
+        limit=1,
+    )
+    monkeypatch.setattr(
+        resume_groups,
+        "INFERENCE_GROUPS",
+        (
+            InferenceGroup(
+                run_id="one_tenth_mathvista_qwen_direct_v1",
+                dataset_path=str(samples),
+                prompt_path="prompts/answer/direct_mathvista.txt",
+                output_path=str(responses),
+                provider="qwen",
+                limit=1,
+                max_tokens=256,
+                dataset="mathvista",
+                model="qwen",
+                prompt="direct",
+                experiment="tmp",
+            ),
+        ),
+    )
+    calls = []
+
+    def fake_detect_file(**kwargs: Any) -> None:
+        calls.append(kwargs)
+        row = _detector_row(
+            run_id="judge_run",
+            sample_id="sample_0",
+            model_response_id="one_tenth_mathvista_qwen_direct_v1:sample_0",
+        )
+        row["model"] = "qwen/qwen3-vl-8b-instruct"
+        write_jsonl(output, [row])
+
+    monkeypatch.setattr(resume_groups, "detect_file", fake_detect_file)
+
+    resume_detector_groups([group], chunk_size=1)
+
+    assert [call["run_id"] for call in calls] == ["judge_run"]
+
+
+
 def test_inference_resume_refuses_locked_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

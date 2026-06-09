@@ -9,8 +9,12 @@ from pathlib import Path
 from src.datasets.jsonl import read_json_records
 from src.detectors.zero_shot_judge import detect_file
 from src.models.openai_compatible import get_provider_config
-from src.models.run_inference import _is_invalid_response_row, resolve_prompt_type, run_inference
-from src.pipelines.compatibility import is_response_row_compatible
+from src.models.run_inference import (
+    _is_compatible_existing_response_row,
+    _is_invalid_response_row,
+    resolve_prompt_type,
+    run_inference,
+)
 from src.pipelines.experiment_groups import DetectorGroup, INFERENCE_GROUPS, InferenceGroup
 from src.pipelines.jsonl_outputs import OutputStatus
 from src.pipelines.result_store import (
@@ -136,6 +140,7 @@ def _resume_inference_groups_locked(
                     record_failures=True,
                     request_timeout_seconds=request_timeout_seconds,
                     request_max_retries=request_max_retries,
+                    resume_provider_model_agnostic=group.model == "qwen",
                 )
             except Exception as exc:
                 run_error = exc
@@ -388,7 +393,7 @@ def _assert_response_file_ready(group: DetectorGroup) -> None:
             invalid.append(response_id)
         if not str(row.get("sample_id", "")):
             missing_sample_id.append(str(index))
-        elif not is_response_row_compatible(
+        elif not _is_compatible_existing_response_row(
             row,
             run_id=expected_group.run_id,
             dataset=expected_group.dataset,
@@ -399,6 +404,7 @@ def _assert_response_file_ready(group: DetectorGroup) -> None:
             provider=expected_group.provider,
             max_tokens=expected_group.max_tokens,
             temperature=0,
+            provider_model_agnostic=expected_group.model == "qwen",
         ):
             incompatible.append(response_id)
     if invalid or missing_sample_id or incompatible:

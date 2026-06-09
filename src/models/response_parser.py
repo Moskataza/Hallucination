@@ -14,7 +14,10 @@ _NO_PATTERNS = (
     re.compile(r"final answer\s*[:：]\s*no\b", re.IGNORECASE),
     re.compile(r"答案\s*[:：]\s*否"),
 )
-_UNCERTAIN_PATTERN = re.compile(r"\b(uncertain|cannot be determined|not sure|insufficient evidence)\b", re.IGNORECASE)
+_UNCERTAIN_PATTERN = re.compile(
+    r"\b(uncertain|cannot be determined|not sure|insufficient evidence)\b",
+    re.IGNORECASE,
+)
 
 
 def normalize_yes_no(text: str) -> str:
@@ -68,7 +71,9 @@ def parse_cot_response(raw_response: str) -> ParsedResponse:
             parse_status="fallback",
         )
 
-    return ParsedResponse(visual_evidence=visual, reasoning=reasoning, parse_status="failed")
+    return ParsedResponse(
+        visual_evidence=visual, reasoning=reasoning, parse_status="failed"
+    )
 
 
 def parse_response(raw_response: str, prompt_type: str) -> ParsedResponse:
@@ -78,7 +83,7 @@ def parse_response(raw_response: str, prompt_type: str) -> ParsedResponse:
 
 
 def _extract_section(text: str, start_label: str, end_labels: tuple[str, ...]) -> str:
-    start_pattern = re.compile(rf"(?:^|\n)\s*(?:\d+\.\s*)?{re.escape(start_label)}\s*[:：]\s*", re.IGNORECASE)
+    start_pattern = _section_label_pattern(start_label)
     start_match = start_pattern.search(text)
     if not start_match:
         return ""
@@ -86,11 +91,19 @@ def _extract_section(text: str, start_label: str, end_labels: tuple[str, ...]) -
     start = start_match.end()
     end = len(text)
     for label in end_labels:
-        end_pattern = re.compile(rf"(?:^|\n)\s*(?:\d+\.\s*)?{re.escape(label)}\s*[:：]\s*", re.IGNORECASE)
+        end_pattern = _section_label_pattern(label)
         end_match = end_pattern.search(text, start)
         if end_match:
             end = min(end, end_match.start())
     return text[start:end].strip()
+
+
+def _section_label_pattern(label: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"(?:^|\n)\s*(?:[-*]\s*)?(?:\*\*)?(?:\d+\.\s*)?(?:\*\*)?"
+        rf"{re.escape(label)}\s*(?:\*\*)?\s*[:：]\s*(?:\*\*)?",
+        re.IGNORECASE,
+    )
 
 
 def _last_nonempty_line(text: str) -> str:

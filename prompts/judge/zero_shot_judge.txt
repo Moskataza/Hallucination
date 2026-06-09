@@ -45,21 +45,22 @@ Judge procedure:
    - contradicted
    - unverifiable
 6. Map claim problems to labels:
-   - object_claim + contradicted/unverifiable presence assertion -> OBJ
-   - attribute_claim + contradicted/unverifiable -> ATT
-   - spatial_claim + contradicted/unverifiable -> SPA
-   - correct visual facts but invalid inference -> IR
-   - unsupported causal, intent, or functionality inference -> CI
-   - internal contradiction or reasoning/final-answer mismatch -> INC
-   - unsupported high-level semantic role, function, or meaning attribution -> SO
+   - object_claim + contradicted/unverifiable object presence, absence, or category assertion -> OBJ
+   - attribute_claim + contradicted/unverifiable visual attribute, count, OCR text, chart/table value, or state assertion -> ATT
+   - spatial_claim + contradicted/unverifiable location or spatial-relation assertion -> SPA
+   - reasoning_claim + invalid inference, calculation, formula, condition use, or evidence-to-conclusion step -> IR
+   - reasoning_claim + conflict with question constraints, choices, reference-answer context, or required answer format -> CI
+   - answer_claim alone is not a hallucination label; only use it for answer_correct unless it is part of a reasoning/final-answer mismatch (INC) or explicit context-conflict reasoning claim (CI)
+   - inconsistency_claim + self-contradiction or reasoning/final-answer mismatch -> INC
+   - causal_claim/semantic_claim + unsupported intent, emotion, cause, function, subjective judgment, or high-level semantic attribution -> SO
 7. Aggregate all triggered labels into a multi-hot vector in the fixed label order.
 8. Choose primary_label deterministically:
    - Factual labels have priority over reasoning labels.
    - OBJ has priority over ATT and SPA.
    - If visual facts are grounded but reasoning is invalid, use IR.
-   - If the main issue is unsupported causality, intent, or function inference, use CI.
-   - If the main issue is internal contradiction, use INC.
-   - If the main issue is semantic over-attribution, use SO.
+   - If the main issue is conflict with question constraints, choices, reference-answer context, or required answer format, use CI.
+   - If the main issue is self-contradiction or reasoning/final-answer mismatch, use INC.
+   - If the main issue is unsupported intent, emotion, cause, function, subjective judgment, or semantic over-attribution, use SO.
    - Otherwise use the first triggered label in fixed order.
 
 Important distinctions:

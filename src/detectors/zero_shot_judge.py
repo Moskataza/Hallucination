@@ -30,7 +30,10 @@ from src.models.openai_compatible import (
     extract_message_text,
     get_provider_config,
 )
-from src.models.run_inference import resolve_sample_image_path
+from src.models.run_inference import (
+    model_response_invalid_reason,
+    resolve_sample_image_path,
+)
 from src.pipelines.compatibility import is_detector_row_compatible
 
 _LABEL_ORDER = ["OBJ", "ATT", "SPA", "IR", "CI", "INC", "SO"]
@@ -57,7 +60,7 @@ _CLAIM_TYPE_LABELS = {
     "attribute_claim": "ATT",
     "spatial_claim": "SPA",
     "reasoning_claim": "IR",
-    "causal_claim": "CI",
+    "causal_claim": "SO",
     "inconsistency_claim": "INC",
     "semantic_claim": "SO",
     "answer_claim": "None",
@@ -65,6 +68,104 @@ _CLAIM_TYPE_LABELS = {
 _CONFIDENCE_VALUES = {"high", "medium", "low"}
 _DEFAULT_JUDGE_MODEL = "gpt-5.4-mini"
 _DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+_JUDGE_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "hallucination_judge_result",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "answer_correct": {"type": ["boolean", "null"]},
+                "is_hallucination": {"type": "boolean"},
+                "label_order": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": _LABEL_ORDER},
+                },
+                "hallucination_vector": {
+                    "type": "array",
+                    "items": {"type": "integer", "enum": [0, 1]},
+                },
+                "hallucination_labels": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": _LABEL_ORDER},
+                },
+                "primary_label": {
+                    "type": "string",
+                    "enum": [*_LABEL_ORDER, "None", "Unclear"],
+                },
+                "coarse_labels": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "Factual Hallucination",
+                            "Logical Hallucination",
+                            "None",
+                            "Unclear",
+                        ],
+                    },
+                },
+                "unsupported_visual_claim": {"type": ["boolean", "null"]},
+                "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                "claim_checks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "claim_id": {"type": "string"},
+                            "claim": {"type": "string"},
+                            "source": {"type": "string"},
+                            "claim_type": {
+                                "type": "string",
+                                "enum": sorted(_CLAIM_TYPES),
+                            },
+                            "relevance_to_question": {
+                                "type": "string",
+                                "enum": sorted(_RELEVANCE_VALUES),
+                            },
+                            "support_status": {
+                                "type": "string",
+                                "enum": sorted(_SUPPORT_STATUSES),
+                            },
+                            "fine_label": {
+                                "type": "string",
+                                "enum": [*_LABEL_ORDER, "None", "Unclear"],
+                            },
+                            "reason": {"type": "string"},
+                        },
+                        "required": [
+                            "claim_id",
+                            "claim",
+                            "source",
+                            "claim_type",
+                            "relevance_to_question",
+                            "support_status",
+                            "fine_label",
+                            "reason",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+                "explanation": {"type": "string"},
+            },
+            "required": [
+                "answer_correct",
+                "is_hallucination",
+                "label_order",
+                "hallucination_vector",
+                "hallucination_labels",
+                "primary_label",
+                "coarse_labels",
+                "unsupported_visual_claim",
+                "confidence",
+                "claim_checks",
+                "explanation",
+            ],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 class JudgeClient(Protocol):
@@ -78,6 +179,7 @@ class JudgeClient(Protocol):
         max_tokens: int = 512,
         allowed_image_root: str | Path | None = None,
         max_image_bytes: int = _DEFAULT_MAX_IMAGE_BYTES,
+        response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -223,7 +325,6 @@ def _unclear_detector_result(
     )
 
 
-
 def build_failed_model_response_detector_result(
     sample: EvalSample,
     response: ModelResponse,
@@ -238,7 +339,6 @@ def build_failed_model_response_detector_result(
         fallback_source="model_inference_failed",
         explanation=f"Model response is unavailable because inference failed: {error}",
     )
-
 
 
 def build_failed_judge_detector_result(
@@ -258,7 +358,6 @@ def build_failed_judge_detector_result(
     )
 
 
-
 def _build_client(
     provider_config: Any,
     *,
@@ -273,19 +372,19 @@ def _build_client(
         )
     except TypeError:
         try:
-            return OpenAICompatibleClient(provider_config, timeout=request_timeout_seconds)
+            return OpenAICompatibleClient(
+                provider_config, timeout=request_timeout_seconds
+            )
         except TypeError:
             return OpenAICompatibleClient(provider_config)
 
 
-
-def _is_failed_model_response(response: ModelResponse) -> bool:
-    return response.inference_metadata.get("status") == "failed"
+def _invalid_model_response_reason(response: ModelResponse) -> str | None:
+    return model_response_invalid_reason(response.to_dict())
 
 
 def _has_reference_answer(sample: EvalSample) -> bool:
     return sample.reference_answer.strip() not in {"", "UNAVAILABLE"}
-
 
 
 def _judge_response_with_retries(
@@ -334,7 +433,6 @@ def _judge_response_with_retries(
     ) from last_error
 
 
-
 def judge_response(
     sample: EvalSample,
     response: ModelResponse,
@@ -359,7 +457,8 @@ def judge_response(
     )
     image_path = resolve_sample_image_path(sample.image_path, path_base=path_base)
     allowed_image_root = (Path(path_base) / image_root).resolve()
-    api_response = client.chat_completion(
+    api_response = _call_judge_model(
+        client=client,
         prompt=prompt,
         image_path=image_path,
         model=model,
@@ -375,7 +474,9 @@ def judge_response(
     if details.get("raw_is_hallucination") is None:
         raise ValueError("Judge response has null required detector fields.")
     if details.get("answer_correct") is None and _has_reference_answer(sample):
-        raise ValueError("Judge response has null answer correctness despite available reference answer.")
+        raise ValueError(
+            "Judge response has null answer correctness despite available reference answer."
+        )
     return details_to_detector_result(
         sample=sample,
         response=response,
@@ -384,6 +485,66 @@ def judge_response(
         run_id=run_id,
         judge_provider=provider,
     )
+
+
+def _call_judge_model(
+    *,
+    client: JudgeClient,
+    prompt: str,
+    image_path: Path,
+    model: str | None,
+    temperature: float,
+    max_tokens: int,
+    allowed_image_root: Path,
+    max_image_bytes: int,
+) -> dict[str, Any]:
+    kwargs = {
+        "prompt": prompt,
+        "image_path": image_path,
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "allowed_image_root": allowed_image_root,
+        "max_image_bytes": max_image_bytes,
+    }
+    try:
+        return client.chat_completion(
+            **kwargs,
+            response_format=_JUDGE_RESPONSE_FORMAT,
+        )
+    except TypeError as exc:
+        if _is_response_format_unsupported_error(exc):
+            return client.chat_completion(**kwargs)
+        raise
+    except RuntimeError as exc:
+        if _is_response_format_unsupported_error(exc):
+            return client.chat_completion(**kwargs)
+        raise
+
+
+def _is_response_format_unsupported_error(error: Exception) -> bool:
+    message = str(error).lower()
+    mentions_structured_output = any(
+        marker in message
+        for marker in (
+            "response_format",
+            "json_schema",
+            "structured output",
+            "structured outputs",
+        )
+    )
+    mentions_unsupported_parameter = any(
+        marker in message
+        for marker in (
+            "unsupported",
+            "not supported",
+            "unknown parameter",
+            "unrecognized request argument",
+            "unrecognized parameter",
+            "unexpected keyword argument",
+        )
+    )
+    return mentions_structured_output and mentions_unsupported_parameter
 
 
 def detect_file(
@@ -441,7 +602,12 @@ def detect_file(
     )
     response_indices = _response_indices(responses_path)
     indexed_rows = [
-        (response_indices.get(str(row["model_response_id"]), len(response_indices) + index), row)
+        (
+            response_indices.get(
+                str(row["model_response_id"]), len(response_indices) + index
+            ),
+            row,
+        )
         for index, row in enumerate(rows)
     ]
     target_response_ids = _target_response_ids(
@@ -468,10 +634,11 @@ def detect_file(
     if concurrency == 1:
         client: JudgeClient | None = None
         for response_index, sample, response in pending:
-            if _is_failed_model_response(response):
+            invalid_reason = _invalid_model_response_reason(response)
+            if invalid_reason is not None:
                 raise RuntimeError(
-                    f"Cannot run detector for failed model response {_model_response_id(response)}. "
-                    "Rerun model inference with --resume until the response succeeds."
+                    f"Cannot run detector for invalid model response {_model_response_id(response)}: "
+                    f"{invalid_reason}. Rerun model inference with --resume until the response succeeds."
                 )
             if client is None:
                 client = _build_client(
@@ -559,7 +726,6 @@ def _target_response_ids(
     }
 
 
-
 def _collect_pending_judgements(
     *,
     responses_path: str | Path,
@@ -612,9 +778,7 @@ def _detect_pending_concurrently(
 
     failures: list[tuple[str, Exception]] = []
     next_item = 0
-    futures: dict[
-        Future[DetectorResult], tuple[int, EvalSample, ModelResponse]
-    ] = {}
+    futures: dict[Future[DetectorResult], tuple[int, EvalSample, ModelResponse]] = {}
     provider_config = get_provider_config(provider)
 
     def submit_next(executor: ThreadPoolExecutor) -> None:
@@ -623,10 +787,11 @@ def _detect_pending_concurrently(
             return
         response_index, sample, response = pending[next_item]
         next_item += 1
-        if _is_failed_model_response(response):
+        invalid_reason = _invalid_model_response_reason(response)
+        if invalid_reason is not None:
             raise RuntimeError(
-                f"Cannot run detector for failed model response {_model_response_id(response)}. "
-                "Rerun model inference with --resume until the response succeeds."
+                f"Cannot run detector for invalid model response {_model_response_id(response)}: "
+                f"{invalid_reason}. Rerun model inference with --resume until the response succeeds."
             )
         client = _build_client(
             provider_config,
@@ -676,7 +841,9 @@ def _detect_pending_concurrently(
             f"{response_id}: {error}" for response_id, error in failures[:10]
         )
         suffix = "" if len(failures) <= 10 else f" ... and {len(failures) - 10} more"
-        raise RuntimeError(f"Failed judge inference for responses: {failed_items}{suffix}")
+        raise RuntimeError(
+            f"Failed judge inference for responses: {failed_items}{suffix}"
+        )
 
 
 def _write_indexed_rows(
@@ -686,8 +853,7 @@ def _write_indexed_rows(
         str(row["model_response_id"]): (index, row) for index, row in indexed_rows
     }
     rows = [
-        row
-        for _, row in sorted(rows_by_response_id.values(), key=lambda item: item[0])
+        row for _, row in sorted(rows_by_response_id.values(), key=lambda item: item[0])
     ]
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -713,7 +879,6 @@ def _write_indexed_rows(
                 temp_path.unlink(missing_ok=True)
                 raise
             time.sleep(0.1 * (attempt + 1))
-
 
 
 def _prepare_output_rows(
@@ -768,6 +933,8 @@ def _is_compatible_existing_detector_row(
     response = response_rows.get(response_id)
     if response is None:
         return False
+    if model_response_invalid_reason(response) is not None:
+        return False
     if str(row.get("sample_id", "")) != str(response.get("sample_id", "")):
         return False
     if response_id != f"{response.get('run_id')}:{response.get('sample_id')}":
@@ -783,7 +950,9 @@ def _is_compatible_existing_detector_row(
     )
 
 
-def _should_retry_detector_row(row: dict[str, Any], samples: dict[str, EvalSample]) -> bool:
+def _should_retry_detector_row(
+    row: dict[str, Any], samples: dict[str, EvalSample]
+) -> bool:
     details = row.get("details")
     if not isinstance(details, dict):
         details = {}
@@ -804,7 +973,9 @@ def _should_retry_detector_row(row: dict[str, Any], samples: dict[str, EvalSampl
     explanation = str(row.get("explanation", details.get("explanation", "")))
     return (
         explanation.startswith("Judge inference failed:")
-        or explanation.startswith("Model response is unavailable because inference failed:")
+        or explanation.startswith(
+            "Model response is unavailable because inference failed:"
+        )
         or explanation == "Could not parse judge response as JSON."
     )
 
@@ -969,6 +1140,12 @@ def _labels_from_payload(
 
 def _derive_claim_label(claim_type: str, support_status: str, fine_label: str) -> str:
     if support_status == "supported":
+        return "None"
+    if claim_type in {"causal_claim", "semantic_claim"}:
+        return "SO"
+    if claim_type == "inconsistency_claim":
+        return "INC"
+    if claim_type == "answer_claim" and fine_label not in {"CI", "INC"}:
         return "None"
     if fine_label in _LABEL_ORDER:
         return fine_label

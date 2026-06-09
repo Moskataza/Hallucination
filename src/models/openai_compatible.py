@@ -94,6 +94,7 @@ class OpenAICompatibleClient:
         max_image_bytes: int = _DEFAULT_MAX_IMAGE_BYTES,
         native_reasoning: bool = False,
         reasoning_max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """发送单次多模态 chat completion 请求。"""
 
@@ -114,6 +115,7 @@ class OpenAICompatibleClient:
             native_reasoning=native_reasoning,
             reasoning_max_tokens=reasoning_max_tokens,
             provider_name=self.config.name,
+            response_format=response_format,
         )
         base_url = (
             os.environ.get(self.config.base_url_env)
@@ -154,18 +156,22 @@ class OpenAICompatibleClient:
             if response.status_code < 400:
                 return response
             if response.status_code not in {429} and response.status_code < 500:
-                raise RuntimeError(
-                    f"Model API request failed with status {response.status_code}"
-                )
+                raise RuntimeError(_response_error_message(response))
             if attempt >= self.max_retries:
-                raise RuntimeError(
-                    f"Model API request failed with status {response.status_code}"
-                )
+                raise RuntimeError(_response_error_message(response))
             time.sleep(self.retry_delay_seconds)
 
         if last_error is not None:
             raise last_error
         raise RuntimeError("Model API request failed")
+
+
+def _response_error_message(response: requests.Response) -> str:
+    message = f"Model API request failed with status {response.status_code}"
+    body = getattr(response, "text", "")
+    if body:
+        return f"{message}: {str(body)[:500]}"
+    return message
 
 
 def build_chat_payload(
@@ -180,6 +186,7 @@ def build_chat_payload(
     native_reasoning: bool = False,
     reasoning_max_tokens: int | None = None,
     provider_name: str | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
@@ -204,6 +211,8 @@ def build_chat_payload(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if response_format is not None:
+        payload["response_format"] = response_format
     if native_reasoning:
         _add_native_reasoning_options(payload, reasoning_max_tokens, provider_name)
     return payload

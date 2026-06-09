@@ -1,11 +1,12 @@
 Based only on the image, answer the question.
 
-Please provide:
-1. Visual Evidence: list the visible facts needed to answer the question.
-2. Reasoning: explain how the evidence supports the answer.
-3. Final Answer: answer with only "Yes" or "No".
+Please use exactly this format:
+Visual Evidence: list only the visible facts needed to answer the question.
+Reasoning: briefly explain how the evidence supports the answer.
+Final Answer: answer with only "Yes" or "No".
 
-If the image does not provide enough evidence, state that it is uncertain.
+Always include the exact label "Final Answer:" before the final answer.
+If the image does not provide enough evidence, state that it is uncertain in the reasoning, then still provide the best final answer.
 Do not introduce visual facts that are not visible in the image.
 
 Question: {question}

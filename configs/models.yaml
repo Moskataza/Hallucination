@@ -15,9 +15,12 @@ models:
       openrouter_instruct:
         cli_provider: openrouter_qwen3_vl_instruct
         default_model: qwen/qwen3-vl-8b-instruct
+        enabled: false
+        note: disabled because the current run uses DashScope Qwen
       openrouter_thinking:
         cli_provider: openrouter_qwen3_vl_thinking
         default_model: qwen/qwen3-vl-8b-thinking
+        enabled: false
         note: model-internal thinking variant; keep prompt_type separate for direct vs evidence_grounded_cot
   gpt5:
     type: closed
