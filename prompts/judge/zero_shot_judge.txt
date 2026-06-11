@@ -66,13 +66,12 @@ Judge procedure:
    - answer_claim alone is not a hallucination label; only use CI or INC if the answer claim explicitly conflicts with context or contradicts the response's own reasoning.
 8. Set fine_label to None for supported, not_applicable, non_claim, and answer_claim cases that do not trigger CI or INC.
 9. Judge final_answer correctness separately as answer_correct. Do not use answer correctness alone to create hallucination labels.
-10. Aggregate response-level fields deterministically from claim_checks:
-    - hallucination_labels is the ordered set of non-None fine labels from contradicted/unverifiable claim_checks.
-    - hallucination_vector follows the fixed fine-label order.
-    - is_hallucination is true iff hallucination_labels is non-empty.
-    - primary_label is selected from hallucination_labels using the priority rule below.
+10. Set response-level summary fields from claim_checks:
+    - hallucination_vector follows the fixed fine-label order using non-None fine labels from contradicted/unverifiable claim_checks.
+    - is_hallucination is true iff hallucination_vector contains any 1.
+    - primary_label is selected from triggered fine labels using the priority rule below.
     - unsupported_visual_claim is true iff any factual label OBJ/ATT/SPA is present.
-11. Before returning JSON, verify that is_hallucination, hallucination_vector, hallucination_labels, primary_label, coarse_labels, and claim_checks are mutually consistent. Set summary_consistent_with_claims accordingly.
+11. Before returning JSON, verify that is_hallucination, hallucination_vector, primary_label, coarse_labels, and claim_checks are mutually consistent. Set summary_consistent_with_claims accordingly. Do not output hallucination_labels; the program derives that field from claim_checks.
 
 Primary label priority:
 - Factual labels have priority over reasoning labels.
@@ -107,7 +106,6 @@ Schema:
   "is_hallucination": true,
   "label_order": ["OBJ", "ATT", "SPA", "IR", "CI", "INC", "SO"],
   "hallucination_vector": [1, 0, 0, 0, 0, 0, 0],
-  "hallucination_labels": ["OBJ"],
   "primary_label": "OBJ",
   "coarse_labels": ["Factual Hallucination"],
   "unsupported_visual_claim": true,
@@ -135,7 +133,6 @@ Allowed values:
 - is_hallucination: true or false only; never null
 - label_order: exactly ["OBJ", "ATT", "SPA", "IR", "CI", "INC", "SO"]
 - hallucination_vector: exactly seven integers, each 0 or 1
-- hallucination_labels: subset of OBJ, ATT, SPA, IR, CI, INC, SO
 - primary_label: OBJ, ATT, SPA, IR, CI, INC, SO, None, or Unclear
 - coarse_labels: subset of Factual Hallucination, Logical Hallucination, None, Unclear
 - unsupported_visual_claim: true, false, or null

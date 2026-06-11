@@ -68,7 +68,6 @@ def _judge_payload(**overrides: Any) -> dict[str, Any]:
         "is_hallucination": True,
         "label_order": ["OBJ", "ATT", "SPA", "IR", "CI", "INC", "SO"],
         "hallucination_vector": [1, 0, 0, 0, 0, 0, 0],
-        "hallucination_labels": ["OBJ"],
         "primary_label": "OBJ",
         "coarse_labels": ["Factual Hallucination"],
         "unsupported_visual_claim": True,
@@ -545,6 +544,9 @@ def test_judge_response_attaches_image_and_returns_detector_result(tmp_path: Pat
     assert client.calls[0]["response_format"]["type"] == "json_schema"
     schema = client.calls[0]["response_format"]["json_schema"]["schema"]
     assert schema["properties"]["is_hallucination"] == {"type": "boolean"}
+    assert "hallucination_labels" not in schema["properties"]
+    assert "hallucination_labels" not in schema["required"]
+    assert result.details["hallucination_labels"] == ["OBJ"]
     assert schema["additionalProperties"] is False
 
 

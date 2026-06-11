@@ -98,10 +98,6 @@ _JUDGE_RESPONSE_FORMAT = {
                     "type": "array",
                     "items": {"type": "integer", "enum": [0, 1]},
                 },
-                "hallucination_labels": {
-                    "type": "array",
-                    "items": {"type": "string", "enum": _LABEL_ORDER},
-                },
                 "primary_label": {
                     "type": "string",
                     "enum": [*_LABEL_ORDER, "None", "Unclear"],
@@ -173,7 +169,6 @@ _JUDGE_RESPONSE_FORMAT = {
                 "is_hallucination",
                 "label_order",
                 "hallucination_vector",
-                "hallucination_labels",
                 "primary_label",
                 "coarse_labels",
                 "unsupported_visual_claim",
@@ -1241,19 +1236,30 @@ def _raw_normalized_mismatch(
     normalized_primary_label: str,
 ) -> bool:
     raw_is_hallucination = _coerce_optional_bool(payload.get("is_hallucination"))
-    if raw_is_hallucination is not None and raw_is_hallucination != normalized_is_hallucination:
+    if (
+        raw_is_hallucination is not None
+        and raw_is_hallucination != normalized_is_hallucination
+    ):
         return True
     raw_labels = payload.get("hallucination_labels")
     if isinstance(raw_labels, list):
         parsed_labels = [
             label
             for label in _LABEL_ORDER
-            if label in {normalize_fine_label(str(raw_label)) for raw_label in raw_labels}
+            if label
+            in {normalize_fine_label(str(raw_label)) for raw_label in raw_labels}
         ]
         if parsed_labels != normalized_labels:
             return True
     raw_vector = payload.get("hallucination_vector")
-    if isinstance(raw_vector, list) and [1 if value == 1 or value is True else 0 for value in raw_vector[: len(_LABEL_ORDER)]] != normalized_vector:
+    if (
+        isinstance(raw_vector, list)
+        and [
+            1 if value == 1 or value is True else 0
+            for value in raw_vector[: len(_LABEL_ORDER)]
+        ]
+        != normalized_vector
+    ):
         return True
     raw_primary = normalize_fine_label(str(payload.get("primary_label", "Unclear")))
     return raw_primary != normalized_primary_label
