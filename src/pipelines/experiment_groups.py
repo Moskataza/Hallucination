@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Literal
 
-DatasetName = Literal["pope", "mathvista"]
+DatasetName = Literal["pope", "mathvista", "xlrs_bench"]
 PromptName = Literal["direct", "cot"]
 ModelName = Literal["gemini", "qwen"]
 StageName = Literal["responses", "detectors", "all", "validate"]
@@ -45,6 +45,7 @@ class DetectorGroup:
     prompt: PromptName
     experiment: str = "one_tenth"
     version: str = "v1"
+    response_version: str = "v1"
     limit: int | None = None
     offset: int = 0
 
@@ -156,18 +157,75 @@ ONE_TENTH_INFERENCE_GROUPS: tuple[InferenceGroup, ...] = (
     ),
 )
 
-INFERENCE_GROUPS: tuple[InferenceGroup, ...] = ONE_TENTH_INFERENCE_GROUPS
+XLRS_PILOT_INFERENCE_GROUPS: tuple[InferenceGroup, ...] = (
+    InferenceGroup(
+        experiment="xlrs_pilot",
+        run_id="xlrs_pilot_xlrs_bench_gemini_direct_v1",
+        dataset_path="data/processed/xlrs_eval.jsonl",
+        prompt_path="prompts/answer/direct_xlrs.txt",
+        output_path="outputs/model_responses/xlrs_pilot_xlrs_bench_gemini_direct.jsonl",
+        provider="gemini_local",
+        limit=100,
+        max_tokens=512,
+        dataset="xlrs_bench",
+        model="gemini",
+        prompt="direct",
+    ),
+    InferenceGroup(
+        experiment="xlrs_pilot",
+        run_id="xlrs_pilot_xlrs_bench_gemini_cot_v1",
+        dataset_path="data/processed/xlrs_eval.jsonl",
+        prompt_path="prompts/answer/evidence_grounded_cot_xlrs.txt",
+        output_path="outputs/model_responses/xlrs_pilot_xlrs_bench_gemini_cot.jsonl",
+        provider="gemini_local",
+        limit=100,
+        max_tokens=512,
+        dataset="xlrs_bench",
+        model="gemini",
+        prompt="cot",
+    ),
+    InferenceGroup(
+        experiment="xlrs_pilot",
+        run_id="xlrs_pilot_xlrs_bench_qwen_direct_v1",
+        dataset_path="data/processed/xlrs_eval.jsonl",
+        prompt_path="prompts/answer/direct_xlrs.txt",
+        output_path="outputs/model_responses/xlrs_pilot_xlrs_bench_qwen_direct.jsonl",
+        provider="qwen",
+        limit=100,
+        max_tokens=512,
+        dataset="xlrs_bench",
+        model="qwen",
+        prompt="direct",
+    ),
+    InferenceGroup(
+        experiment="xlrs_pilot",
+        run_id="xlrs_pilot_xlrs_bench_qwen_cot_v1",
+        dataset_path="data/processed/xlrs_eval.jsonl",
+        prompt_path="prompts/answer/evidence_grounded_cot_xlrs.txt",
+        output_path="outputs/model_responses/xlrs_pilot_xlrs_bench_qwen_cot.jsonl",
+        provider="qwen",
+        limit=100,
+        max_tokens=512,
+        dataset="xlrs_bench",
+        model="qwen",
+        prompt="cot",
+    ),
+)
+
+INFERENCE_GROUPS: tuple[InferenceGroup, ...] = (
+    ONE_TENTH_INFERENCE_GROUPS + XLRS_PILOT_INFERENCE_GROUPS
+)
 
 
 def _detector_output_path(group: InferenceGroup) -> str:
-    suffix = f"{group.experiment}_{group.dataset}_{group.model}_{group.prompt}_zero_shot.jsonl"
+    suffix = f"{group.experiment}_{group.dataset}_{group.model}_{group.prompt}_zero_shot_v2.jsonl"
     return f"outputs/detector_results/{suffix}"
 
 
 DETECTOR_GROUPS: tuple[DetectorGroup, ...] = tuple(
     DetectorGroup(
         experiment=group.experiment,
-        run_id=f"{group.run_id.replace('_v1', '')}_zero_shot_gpt54_v1",
+        run_id=f"{group.run_id.replace('_v1', '')}_zero_shot_gpt54_v2",
         samples_path=group.dataset_path,
         responses_path=group.output_path,
         output_path=_detector_output_path(group),
@@ -176,7 +234,8 @@ DETECTOR_GROUPS: tuple[DetectorGroup, ...] = tuple(
         dataset=group.dataset,
         model=group.model,
         prompt=group.prompt,
-        version="v1",
+        version="v2",
+        response_version=group.version,
         limit=group.limit,
         offset=group.offset,
     )
@@ -252,10 +311,12 @@ def _matching_inference_group(detector_group: DetectorGroup) -> InferenceGroup:
             and group.prompt == detector_group.prompt
             and group.limit == detector_group.limit
             and group.offset == detector_group.offset
-            and group.version == detector_group.version
+            and group.version == detector_group.response_version
         ):
             return group
-    raise ValueError(f"No matching inference group for detector group {detector_group.run_id}.")
+    raise ValueError(
+        f"No matching inference group for detector group {detector_group.run_id}."
+    )
 
 
 def _response_reuse_key(group: InferenceGroup) -> tuple[object, ...]:

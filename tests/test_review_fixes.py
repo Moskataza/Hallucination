@@ -51,6 +51,19 @@ def test_judge_prompt_rendering_preserves_json_examples():
     assert "Is there a dog?" in checklist
 
 
+def test_zero_shot_prompt_contains_v2_claim_grounding_rules():
+    taxonomy = Path("prompts/judge/taxonomy_definition.txt").read_text(encoding="utf-8")
+    zero_shot = render_zero_shot_judge_prompt(_sample(), _response(), taxonomy)
+
+    assert "atomic checkable claims" in zero_shot
+    assert "evidence_source" in zero_shot
+    assert "not_applicable" in zero_shot
+    assert "non_claim" in zero_shot
+    assert "summary_consistent_with_claims" in zero_shot
+    assert "Concise yes/no" in zero_shot
+    assert "reference_answer=UNAVAILABLE" in zero_shot
+
+
 def test_taxonomy_none_normalization():
     assert normalize_fine_label("None") == "None"
     assert normalize_fine_label("none") == "None"

@@ -1,22 +1,25 @@
 Hallucination definition:
-A hallucination occurs when the model response contains content that is inconsistent with the image facts, the question requirements, the reference-answer context, or a valid reasoning process grounded in the image and question.
+A hallucination occurs when the model response contains content that is inconsistent with the image facts, the question requirements, choices, reference-answer context when available, response-internal consistency, or a valid reasoning process grounded in the image and question.
 
 Important principles:
 - The unit of judgment is the full model response, including visible reasoning and the final answer.
 - An incorrect final answer alone does not necessarily imply hallucination.
 - A correct final answer can still contain hallucination if the reasoning or visual evidence is unsupported.
-- Judge only from the image, question, choices, reference answer, model reasoning, and model final answer.
+- A short answer without detailed evidence is not hallucination by itself.
+- Judge only from the image, question, choices, reference answer when available, model reasoning, model final answer, valid math rules, valid diagram rules, and internal consistency.
+- If the reference answer is UNAVAILABLE or empty, it cannot be used as contradiction evidence.
+- A legitimate inference grounded in the diagram, question constraints, choices, or math rules is supported even if it is not directly printed as text in the image.
 - A truncated response with no explicit final answer should be rejected before detector judging and regenerated, not scored as a normal response.
 
 Taxonomy:
 
 Factual Hallucination: visual fact claims conflict with, or are unsupported by, the image evidence.
 - OBJ: Object / Category Error. The response claims an object is present when it is absent, claims an object is absent when it is present, or identifies an object as the wrong category.
-- ATT: Attribute Error. The response misstates an object's visual attribute, including color, count, size, shape, state, OCR text, chart/table value, or similar attributes.
+- ATT: Attribute Error. The response misstates an object's visual attribute, including color, count, size, shape, state, OCR text, chart/table value, diagram value, or similar attributes.
 - SPA: Spatial / Location Error. The response misstates spatial relations or locations, including left/right, above/below, front/behind, containment, adjacency, or relative position.
 
 Logical Hallucination: the response may use some correct visual facts, but the reasoning, task fulfillment, or response consistency is invalid.
-- IR: Invalid Reasoning. The reasoning step is not supported by the stated evidence, uses an invalid formula or calculation, misunderstands a condition, or the evidence cannot justify the conclusion.
-- CI: Context Inconsistency. The response conflicts with the question constraints, choices, reference-answer context, or required answer format.
+- IR: Invalid Reasoning. The reasoning step is not supported by the stated evidence, uses an invalid formula or calculation, misunderstands a condition, or the evidence cannot justify the conclusion. In MathVista, use IR for invalid calculation, invalid inference, or misuse of a diagram/question condition.
+- CI: Context Inconsistency. The response conflicts with the question constraints, choices, reference-answer context when available, or required answer format.
 - INC: Internal Inconsistency. The response contradicts itself, or the reasoning supports one answer while the final answer gives another.
-- SO: Semantic Over-attribution / Subjective Opinion. The response assigns high-level semantics, intent, emotion, cause, function, or subjective judgment that cannot be determined from the image evidence.
+- SO: Semantic Over-attribution / Subjective Opinion. The response assigns high-level semantics, intent, emotion, cause, function, or subjective judgment that cannot be determined from allowed evidence.

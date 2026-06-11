@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from src.models.openai_compatible import PROVIDERS
 from src.pipelines.experiment_groups import (
@@ -14,14 +15,18 @@ from src.pipelines.resume_groups import resume_detector_groups, resume_inference
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run or validate stable experiment pipeline groups.")
+    parser = argparse.ArgumentParser(
+        description="Run or validate stable experiment pipeline groups."
+    )
     parser.add_argument("--experiment", action="append", dest="experiments")
     parser.add_argument(
         "--stage",
         choices=["responses", "detectors", "all", "validate"],
         default="validate",
     )
-    parser.add_argument("--dataset", action="append", choices=["pope", "mathvista"])
+    parser.add_argument(
+        "--dataset", action="append", choices=["pope", "mathvista", "xlrs_bench"]
+    )
     parser.add_argument("--model", action="append", choices=["gemini", "qwen"])
     parser.add_argument("--prompt", action="append", choices=["direct", "cot"])
     parser.add_argument("--detector", action="append", choices=["zero_shot"])
@@ -103,6 +108,9 @@ def _print_final_validation(stage: str, inference_groups, detector_groups) -> No
 
 def _print_validation(inference_groups, detector_groups) -> None:
     for group in inference_groups:
+        if not Path(group.dataset_path).exists():
+            print(f"RESPONSES {group.run_id} dataset_missing={group.dataset_path}")
+            continue
         status = inspect_inference_group(group).status
         print(
             f"RESPONSES {group.run_id} valid={status.valid} missing={status.missing} "
@@ -113,6 +121,12 @@ def _print_validation(inference_groups, detector_groups) -> None:
         if status.invalid_examples:
             print(f"  invalid_examples={list(status.invalid_examples)}")
     for group in detector_groups:
+        if not Path(group.samples_path).exists():
+            print(f"DETECTORS {group.run_id} samples_missing={group.samples_path}")
+            continue
+        if not Path(group.responses_path).exists():
+            print(f"DETECTORS {group.run_id} responses_missing={group.responses_path}")
+            continue
         status = inspect_detector_group(group).status
         print(
             f"DETECTORS {group.run_id} valid={status.valid} missing={status.missing} "

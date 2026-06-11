@@ -80,6 +80,55 @@ def build_alignment_outputs(
     }
 
 
+def build_versioned_key_rows(
+    base_key_rows: list[dict[str, Any]],
+    detector_rows: list[dict[str, Any]],
+    *,
+    source_file: str,
+) -> list[dict[str, Any]]:
+    detector_by_response_id = _unique_index(detector_rows, "model_response_id")
+    versioned_rows = []
+    missing = []
+    for base_row in base_key_rows:
+        response_id = str(base_row.get("model_response_id", ""))
+        detector_row = detector_by_response_id.get(response_id)
+        if detector_row is None:
+            missing.append(response_id)
+            continue
+        raw_details = detector_row.get("details")
+        details: dict[str, Any] = raw_details if isinstance(raw_details, dict) else {}
+        versioned_row = dict(base_row)
+        versioned_row.update(
+            {
+                "source_file": source_file,
+                "detector": detector_row.get("detector", ""),
+                "detector_is_hallucination": detector_row.get("is_hallucination"),
+                "detector_answer_correct": detector_row.get("answer_correct"),
+                "detector_unsupported_visual_claim": detector_row.get(
+                    "unsupported_visual_claim"
+                ),
+                "detector_confidence": detector_row.get("confidence", ""),
+                "detector_taxonomy": detector_row.get("taxonomy", {}),
+                "detector_hallucination_labels": (
+                    details.get("hallucination_labels")
+                    if "hallucination_labels" in details
+                    else None
+                ),
+                "detector_explanation": detector_row.get("explanation", ""),
+                "detector_raw_judge_response": detector_row.get(
+                    "raw_judge_response", ""
+                ),
+            }
+        )
+        versioned_rows.append(versioned_row)
+    if missing:
+        examples = ", ".join(missing[:5])
+        raise ValueError(
+            f"Missing {len(missing)} detector rows for fixed annotation keys: {examples}"
+        )
+    return versioned_rows
+
+
 def join_annotations_with_key(
     annotations: list[dict[str, Any]],
     key_rows: list[dict[str, Any]],

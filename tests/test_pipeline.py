@@ -29,7 +29,7 @@ def test_select_inference_groups_filters_registered_experiment() -> None:
 
 
 def test_final_validation_reports_only_completed_stage(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     class Status:
         valid = 1
@@ -43,12 +43,18 @@ def test_final_validation_reports_only_completed_stage(
     class PipelineStatus:
         status = Status()
 
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    write_jsonl(samples, [_sample_row("sample_0")])
+    write_jsonl(responses, [_response_row(sample_id="sample_0")])
+    detector_calls = []
+
     inference_group = InferenceGroup(
         experiment="tmp",
         run_id="response_run",
-        dataset_path="samples.jsonl",
+        dataset_path=str(samples),
         prompt_path="prompts/answer/direct_mathvista.txt",
-        output_path="responses.jsonl",
+        output_path=str(responses),
         provider="gemini_local",
         limit=1,
         max_tokens=256,
@@ -59,8 +65,8 @@ def test_final_validation_reports_only_completed_stage(
     detector_group = DetectorGroup(
         experiment="tmp",
         run_id="detector_run",
-        samples_path="samples.jsonl",
-        responses_path="responses.jsonl",
+        samples_path=str(samples),
+        responses_path=str(responses),
         output_path="judge.jsonl",
         provider="gpt54_local",
         detector="zero_shot",
@@ -69,18 +75,32 @@ def test_final_validation_reports_only_completed_stage(
         prompt="direct",
         limit=1,
     )
-    monkeypatch.setattr(run_stable_pipeline, "inspect_inference_group", lambda group: PipelineStatus())
-    monkeypatch.setattr(run_stable_pipeline, "inspect_detector_group", lambda group: PipelineStatus())
+    monkeypatch.setattr(
+        run_stable_pipeline, "inspect_inference_group", lambda group: PipelineStatus()
+    )
 
-    run_stable_pipeline._print_final_validation("detectors", [inference_group], [detector_group])
+    def fake_inspect_detector_group(group: DetectorGroup) -> PipelineStatus:
+        detector_calls.append(group.run_id)
+        return PipelineStatus()
+
+    monkeypatch.setattr(
+        run_stable_pipeline, "inspect_detector_group", fake_inspect_detector_group
+    )
+
+    run_stable_pipeline._print_final_validation(
+        "detectors", [inference_group], [detector_group]
+    )
 
     output = capsys.readouterr().out
     assert "FINAL_VALIDATE" in output
     assert "DETECTORS detector_run" in output
     assert "RESPONSES response_run" not in output
+    assert detector_calls == ["detector_run"]
 
 
-def test_select_detector_groups_can_reuse_response_paths_from_source_experiment() -> None:
+def test_select_detector_groups_can_reuse_response_paths_from_source_experiment() -> (
+    None
+):
     groups = select_detector_groups(
         experiments={"one_tenth"},
         datasets={"mathvista"},
@@ -90,7 +110,16 @@ def test_select_detector_groups_can_reuse_response_paths_from_source_experiment(
     )
 
     assert len(groups) == 1
-    assert groups[0].responses_path == "outputs/model_responses/one_tenth_mathvista_gemini_direct.jsonl"
+    assert (
+        groups[0].responses_path
+        == "outputs/model_responses/one_tenth_mathvista_gemini_direct.jsonl"
+    )
+    assert (
+        groups[0].output_path
+        == "outputs/detector_results/one_tenth_mathvista_gemini_direct_zero_shot_v2.jsonl"
+    )
+    assert groups[0].version == "v2"
+    assert groups[0].response_version == "v1"
 
 
 def test_select_detector_groups_refuses_incompatible_response_reuse(
@@ -147,7 +176,9 @@ def test_select_detector_groups_refuses_incompatible_response_reuse(
         select_detector_groups(experiments={"target"}, responses_from="source")
 
 
-def test_inspect_inference_group_reports_missing_and_invalid_rows(tmp_path: Path) -> None:
+def test_inspect_inference_group_reports_missing_and_invalid_rows(
+    tmp_path: Path,
+) -> None:
     dataset = tmp_path / "samples.jsonl"
     output = tmp_path / "responses.jsonl"
     write_jsonl(
@@ -194,7 +225,9 @@ def test_inspect_inference_group_reports_missing_and_invalid_rows(tmp_path: Path
     assert status.missing_examples == ("sample_2",)
 
 
-def test_inspect_inference_group_rejects_incompatible_response_rows(tmp_path: Path) -> None:
+def test_inspect_inference_group_rejects_incompatible_response_rows(
+    tmp_path: Path,
+) -> None:
     dataset = tmp_path / "samples.jsonl"
     output = tmp_path / "responses.jsonl"
     write_jsonl(dataset, [{"sample_id": "sample_0"}])
@@ -234,7 +267,9 @@ def test_inspect_inference_group_rejects_incompatible_response_rows(tmp_path: Pa
     assert status.invalid_examples == ("sample_0",)
 
 
-def test_inspect_detector_group_rejects_incompatible_detector_rows(tmp_path: Path) -> None:
+def test_inspect_detector_group_rejects_incompatible_detector_rows(
+    tmp_path: Path,
+) -> None:
     samples = tmp_path / "samples.jsonl"
     responses = tmp_path / "responses.jsonl"
     output = tmp_path / "judge.jsonl"
@@ -271,7 +306,9 @@ def test_inspect_detector_group_rejects_incompatible_detector_rows(tmp_path: Pat
     assert status.invalid_examples == ("model_run:sample_0",)
 
 
-def test_inspect_detector_group_rejects_mismatched_sample_identity(tmp_path: Path) -> None:
+def test_inspect_detector_group_rejects_mismatched_sample_identity(
+    tmp_path: Path,
+) -> None:
     samples = tmp_path / "samples.jsonl"
     responses = tmp_path / "responses.jsonl"
     output = tmp_path / "judge.jsonl"
@@ -563,7 +600,6 @@ def test_detector_resume_accepts_qwen_provider_model_variants(
     resume_detector_groups([group], chunk_size=1)
 
     assert [call["run_id"] for call in calls] == ["judge_run"]
-
 
 
 def test_inference_resume_refuses_locked_output(

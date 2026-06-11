@@ -8,8 +8,10 @@ from src.datasets.build_human_annotation_set import (
     write_annotation_outputs,
 )
 from src.datasets.jsonl import read_jsonl
+from src.analysis.claim_alignment_breakdown import build_breakdown_tables
 from src.evaluation.evaluate_human_alignment import (
     build_alignment_outputs,
+    build_versioned_key_rows,
     join_annotations_with_key,
 )
 
@@ -81,7 +83,9 @@ def test_diagnostic_sampling_selects_actual_low_confidence_row():
 def test_sampling_excludes_unusable_incomplete_responses():
     rows = [
         _joined_row("mathvista", "gemini", "direct", "p1", True, raw_response=""),
-        _joined_row("mathvista", "gemini", "direct", "p2", True, raw_response="unfinished:"),
+        _joined_row(
+            "mathvista", "gemini", "direct", "p2", True, raw_response="unfinished:"
+        ),
         _joined_row(
             "mathvista",
             "gemini",
@@ -91,7 +95,9 @@ def test_sampling_excludes_unusable_incomplete_responses():
             raw_response="long reasoning " * 120,
             final_answer="long reasoning " * 120,
         ),
-        _joined_row("mathvista", "gemini", "direct", "p4", True, raw_response="Final Answer: A"),
+        _joined_row(
+            "mathvista", "gemini", "direct", "p4", True, raw_response="Final Answer: A"
+        ),
         _joined_row("mathvista", "gemini", "direct", "p5", False, raw_response="No"),
         _joined_row("mathvista", "gemini", "direct", "p6", False, raw_response=None),
         _joined_row(
@@ -273,6 +279,104 @@ def test_alignment_join_rejects_unmatched_and_duplicate_rows():
         )
 
 
+def test_build_versioned_key_rows_preserves_annotation_order_and_replaces_detector_fields():
+    base_rows = [_key_row("ann_0001", True), _key_row("ann_0002", False)]
+    detector_rows = [
+        _new_detector_row(base_rows[1], True),
+        _new_detector_row(base_rows[0], False),
+    ]
+
+    versioned = build_versioned_key_rows(
+        base_rows, detector_rows, source_file="detector_v2.jsonl"
+    )
+
+    assert [row["annotation_id"] for row in versioned] == ["ann_0001", "ann_0002"]
+    assert versioned[0]["model_response_id"] == base_rows[0]["model_response_id"]
+    assert versioned[0]["question"] == base_rows[0]["question"]
+    assert versioned[0]["source_file"] == "detector_v2.jsonl"
+    assert versioned[0]["detector_is_hallucination"] is False
+    assert versioned[0]["detector_answer_correct"] is True
+    assert versioned[0]["detector_taxonomy"] == {"coarse": "None", "fine": "None"}
+    assert versioned[0]["detector_hallucination_labels"] == []
+    assert versioned[1]["detector_is_hallucination"] is True
+    assert versioned[1]["detector_hallucination_labels"] == ["OBJ"]
+    assert versioned[1]["detector_raw_judge_response"] == "raw-v2"
+
+
+def test_build_versioned_key_rows_preserves_missing_normalized_labels_as_absent():
+    base_rows = [_key_row("ann_0001", True)]
+    detector_row = _new_detector_row(base_rows[0], True)
+    detector_row.pop("details")
+
+    versioned = build_versioned_key_rows(
+        base_rows, [detector_row], source_file="detector_legacy.jsonl"
+    )
+
+    assert versioned[0]["detector_hallucination_labels"] is None
+
+
+def test_fine_label_breakdown_prefers_normalized_detector_labels():
+    annotations = [_annotation_row("ann_0001", True, fine_labels=("INC",))]
+    key_row = _key_row("ann_0001", True)
+    key_row["detector_taxonomy"] = {"coarse": "Factual", "fine": "OBJ"}
+    key_row["detector_raw_judge_response"] = '{"hallucination_labels":["ATT"]}'
+    key_row["detector_hallucination_labels"] = ["INC"]
+
+    outputs = build_breakdown_tables(annotations, [key_row])
+    fine_rows = {row["value"]: row for row in outputs["fine_label_breakdown"]}
+
+    assert fine_rows["INC"]["tp"] == 1
+    assert fine_rows["ATT"]["fp"] == 0
+    assert fine_rows["OBJ"]["fp"] == 0
+
+
+def test_fine_label_breakdown_treats_empty_normalized_labels_as_authoritative():
+    annotations = [_annotation_row("ann_0001", False)]
+    key_row = _key_row("ann_0001", True)
+    key_row["detector_taxonomy"] = {"coarse": "Factual", "fine": "OBJ"}
+    key_row["detector_raw_judge_response"] = '{"hallucination_labels":["ATT"]}'
+    key_row["detector_hallucination_labels"] = []
+
+    outputs = build_breakdown_tables(annotations, [key_row])
+    fine_rows = {row["value"]: row for row in outputs["fine_label_breakdown"]}
+
+    assert fine_rows["OBJ"]["fp"] == 0
+    assert fine_rows["ATT"]["fp"] == 0
+
+
+def test_fine_label_breakdown_falls_back_when_normalized_labels_are_absent():
+    annotations = [_annotation_row("ann_0001", False)]
+    key_row = _key_row("ann_0001", True)
+    key_row["detector_taxonomy"] = {"coarse": "Factual", "fine": "OBJ"}
+    key_row["detector_raw_judge_response"] = '{"hallucination_labels":["ATT"]}'
+    key_row["detector_hallucination_labels"] = None
+
+    outputs = build_breakdown_tables(annotations, [key_row])
+    fine_rows = {row["value"]: row for row in outputs["fine_label_breakdown"]}
+
+    assert fine_rows["ATT"]["fp"] == 1
+    assert fine_rows["OBJ"]["fp"] == 0
+
+
+def test_fine_label_breakdown_skips_unclear_human_rows():
+    annotations = [_annotation_row("ann_0001", "unclear", fine_labels=("OBJ",))]
+    key_row = _key_row("ann_0001", True)
+    key_row["detector_hallucination_labels"] = ["OBJ"]
+
+    outputs = build_breakdown_tables(annotations, [key_row])
+    fine_rows = {row["value"]: row for row in outputs["fine_label_breakdown"]}
+
+    assert fine_rows["OBJ"]["evaluated_count"] == 0
+    assert fine_rows["OBJ"]["skipped"] == 1
+
+
+def test_build_versioned_key_rows_rejects_missing_detector_result():
+    with pytest.raises(ValueError, match="Missing 1 detector rows"):
+        build_versioned_key_rows(
+            [_key_row("ann_0001", True)], [], source_file="detector_v2.jsonl"
+        )
+
+
 def _sample_row(sample_id: str) -> dict[str, object]:
     return {
         "sample_id": sample_id,
@@ -412,4 +516,26 @@ def _key_row(annotation_id: str, detector_label: bool) -> dict[str, object]:
         "reference_answer": "no",
         "model_response": "Yes",
         "image_path": "images/p.jpg",
+    }
+
+
+def _new_detector_row(
+    base_key: dict[str, object], detector_label: bool
+) -> dict[str, object]:
+    return {
+        "model_response_id": base_key["model_response_id"],
+        "detector": "response_claim_zero_shot_judge",
+        "answer_correct": not detector_label,
+        "is_hallucination": detector_label,
+        "unsupported_visual_claim": detector_label,
+        "confidence": "medium",
+        "taxonomy": {
+            "coarse": "Factual" if detector_label else "None",
+            "fine": "OBJ" if detector_label else "None",
+        },
+        "details": {
+            "hallucination_labels": ["OBJ"] if detector_label else [],
+        },
+        "explanation": "v2 explanation",
+        "raw_judge_response": "raw-v2",
     }

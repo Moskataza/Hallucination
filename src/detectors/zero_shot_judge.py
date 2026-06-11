@@ -46,6 +46,7 @@ _CLAIM_TYPES = {
     "inconsistency_claim",
     "semantic_claim",
     "answer_claim",
+    "non_claim",
 }
 _RELEVANCE_VALUES = {
     "directly_relevant",
@@ -54,7 +55,17 @@ _RELEVANCE_VALUES = {
     "irrelevant_extra",
     "required_but_missing",
 }
-_SUPPORT_STATUSES = {"supported", "contradicted", "unverifiable"}
+_SUPPORT_STATUSES = {"supported", "contradicted", "unverifiable", "not_applicable"}
+_EVIDENCE_SOURCES = {
+    "image",
+    "question",
+    "choices",
+    "reference_answer",
+    "math_rule",
+    "diagram_rule",
+    "internal_consistency",
+    "none",
+}
 _CLAIM_TYPE_LABELS = {
     "object_claim": "OBJ",
     "attribute_claim": "ATT",
@@ -64,6 +75,7 @@ _CLAIM_TYPE_LABELS = {
     "inconsistency_claim": "INC",
     "semantic_claim": "SO",
     "answer_claim": "None",
+    "non_claim": "None",
 }
 _CONFIDENCE_VALUES = {"high", "medium", "low"}
 _DEFAULT_JUDGE_MODEL = "gpt-5.4-mini"
@@ -132,6 +144,10 @@ _JUDGE_RESPONSE_FORMAT = {
                                 "type": "string",
                                 "enum": [*_LABEL_ORDER, "None", "Unclear"],
                             },
+                            "evidence_source": {
+                                "type": "string",
+                                "enum": sorted(_EVIDENCE_SOURCES),
+                            },
                             "reason": {"type": "string"},
                         },
                         "required": [
@@ -142,11 +158,14 @@ _JUDGE_RESPONSE_FORMAT = {
                             "relevance_to_question",
                             "support_status",
                             "fine_label",
+                            "evidence_source",
                             "reason",
                         ],
                         "additionalProperties": False,
                     },
                 },
+                "summary_consistent_with_claims": {"type": "boolean"},
+                "aggregation_rule": {"type": "string"},
                 "explanation": {"type": "string"},
             },
             "required": [
@@ -160,6 +179,8 @@ _JUDGE_RESPONSE_FORMAT = {
                 "unsupported_visual_claim",
                 "confidence",
                 "claim_checks",
+                "summary_consistent_with_claims",
+                "aggregation_rule",
                 "explanation",
             ],
             "additionalProperties": False,
@@ -227,6 +248,7 @@ def normalize_judge_payload(payload: dict[str, Any]) -> dict[str, Any]:
     claim_checks = _normalize_claim_checks(raw_claim_checks)
     labels = _labels_from_payload(payload, claim_checks, has_claim_checks)
     vector = [1 if label in labels else 0 for label in _LABEL_ORDER]
+    normalized_labels = [label for label in _LABEL_ORDER if label in labels]
     raw_is_hallucination = _coerce_optional_bool(payload.get("is_hallucination"))
     primary_label = _select_primary_label(labels)
     coarse_labels = _coarse_labels(labels)
@@ -237,19 +259,33 @@ def normalize_judge_payload(payload: dict[str, Any]) -> dict[str, Any]:
         unsupported_visual_claim = True
     if not labels and unsupported_visual_claim is None:
         unsupported_visual_claim = False
+    summary_consistent = _coerce_optional_bool(
+        payload.get("summary_consistent_with_claims")
+    )
 
     return {
         "answer_correct": _coerce_optional_bool(payload.get("answer_correct")),
         "is_hallucination": bool(labels),
         "raw_is_hallucination": raw_is_hallucination,
+        "raw_normalized_mismatch": _raw_normalized_mismatch(
+            payload,
+            normalized_is_hallucination=bool(labels),
+            normalized_labels=normalized_labels,
+            normalized_vector=vector,
+            normalized_primary_label=primary_label,
+        ),
         "label_order": list(_LABEL_ORDER),
         "hallucination_vector": vector,
-        "hallucination_labels": [label for label in _LABEL_ORDER if label in labels],
+        "hallucination_labels": normalized_labels,
         "primary_label": primary_label,
         "coarse_labels": coarse_labels,
         "unsupported_visual_claim": unsupported_visual_claim,
         "confidence": _normalize_confidence(payload.get("confidence")),
         "claim_checks": claim_checks,
+        "summary_consistent_with_claims": summary_consistent,
+        "aggregation_rule": str(
+            payload.get("aggregation_rule") or "claim_checks_source_of_truth"
+        ),
         "explanation": str(payload.get("explanation", "")).strip(),
     }
 
@@ -1081,12 +1117,10 @@ def _normalize_claim_checks(value: Any) -> list[dict[str, Any]]:
     for index, item in enumerate(value, start=1):
         if not isinstance(item, dict):
             continue
-        claim_type = _normalize_member(
-            item.get("claim_type"), _CLAIM_TYPES, "reasoning_claim"
-        )
-        support_status = _normalize_member(
-            item.get("support_status"), _SUPPORT_STATUSES, "unverifiable"
-        )
+        claim_type = _normalize_claim_type(item.get("claim_type"))
+        support_status = _normalize_support_status(item.get("support_status"))
+        if claim_type == "non_claim":
+            support_status = "not_applicable"
         fine_label = _derive_claim_label(
             claim_type,
             support_status,
@@ -1105,6 +1139,9 @@ def _normalize_claim_checks(value: Any) -> list[dict[str, Any]]:
                 ),
                 "support_status": support_status,
                 "fine_label": fine_label,
+                "evidence_source": _normalize_evidence_source(
+                    item.get("evidence_source")
+                ),
                 "reason": str(item.get("reason", "")),
             }
         )
@@ -1120,7 +1157,10 @@ def _labels_from_payload(
     if has_claim_checks:
         for check in claim_checks:
             label = normalize_fine_label(str(check.get("fine_label", "None")))
-            if label in _LABEL_ORDER and check.get("support_status") != "supported":
+            if label in _LABEL_ORDER and check.get("support_status") not in {
+                "supported",
+                "not_applicable",
+            }:
                 labels.add(label)
         return labels
 
@@ -1139,7 +1179,7 @@ def _labels_from_payload(
 
 
 def _derive_claim_label(claim_type: str, support_status: str, fine_label: str) -> str:
-    if support_status == "supported":
+    if support_status in {"supported", "not_applicable"} or claim_type == "non_claim":
         return "None"
     if claim_type in {"causal_claim", "semantic_claim"}:
         return "SO"
@@ -1176,6 +1216,7 @@ def _fallback_details(explanation: str) -> dict[str, Any]:
     return {
         "answer_correct": None,
         "is_hallucination": None,
+        "raw_normalized_mismatch": False,
         "label_order": list(_LABEL_ORDER),
         "hallucination_vector": [0, 0, 0, 0, 0, 0, 0],
         "hallucination_labels": [],
@@ -1184,9 +1225,69 @@ def _fallback_details(explanation: str) -> dict[str, Any]:
         "unsupported_visual_claim": None,
         "confidence": "low",
         "claim_checks": [],
+        "summary_consistent_with_claims": None,
+        "aggregation_rule": "claim_checks_source_of_truth",
         "fallback_source": "judge_output_parse_failed",
         "explanation": explanation,
     }
+
+
+def _raw_normalized_mismatch(
+    payload: dict[str, Any],
+    *,
+    normalized_is_hallucination: bool,
+    normalized_labels: list[str],
+    normalized_vector: list[int],
+    normalized_primary_label: str,
+) -> bool:
+    raw_is_hallucination = _coerce_optional_bool(payload.get("is_hallucination"))
+    if raw_is_hallucination is not None and raw_is_hallucination != normalized_is_hallucination:
+        return True
+    raw_labels = payload.get("hallucination_labels")
+    if isinstance(raw_labels, list):
+        parsed_labels = [
+            label
+            for label in _LABEL_ORDER
+            if label in {normalize_fine_label(str(raw_label)) for raw_label in raw_labels}
+        ]
+        if parsed_labels != normalized_labels:
+            return True
+    raw_vector = payload.get("hallucination_vector")
+    if isinstance(raw_vector, list) and [1 if value == 1 or value is True else 0 for value in raw_vector[: len(_LABEL_ORDER)]] != normalized_vector:
+        return True
+    raw_primary = normalize_fine_label(str(payload.get("primary_label", "Unclear")))
+    return raw_primary != normalized_primary_label
+
+
+def _normalize_claim_type(value: Any) -> str:
+    if not isinstance(value, str):
+        return "reasoning_claim"
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in _CLAIM_TYPES:
+        return normalized
+    return "reasoning_claim"
+
+
+def _normalize_support_status(value: Any) -> str:
+    if not isinstance(value, str):
+        return "unverifiable"
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized == "unsupported":
+        return "unverifiable"
+    if normalized in {"not_applicable", "n/a", "na"}:
+        return "not_applicable"
+    if normalized in _SUPPORT_STATUSES:
+        return normalized
+    return "unverifiable"
+
+
+def _normalize_evidence_source(value: Any) -> str:
+    if not isinstance(value, str):
+        return "none"
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in _EVIDENCE_SOURCES:
+        return normalized
+    return "none"
 
 
 def _coerce_optional_bool(value: Any) -> bool | None:

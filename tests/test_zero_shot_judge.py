@@ -214,6 +214,115 @@ def test_parse_judge_output_uses_claim_checks_over_inconsistent_top_level_labels
     assert details["hallucination_vector"] == [0, 0, 0, 0, 0, 0, 0]
     assert details["primary_label"] == "None"
     assert details["claim_checks"][0]["fine_label"] == "None"
+    assert details["raw_normalized_mismatch"] is True
+
+
+def test_parse_judge_output_handles_not_applicable_and_non_claim():
+    details = parse_judge_output(
+        json.dumps(
+            _judge_payload(
+                is_hallucination=False,
+                hallucination_vector=[0, 0, 0, 0, 0, 0, 0],
+                hallucination_labels=[],
+                primary_label="None",
+                unsupported_visual_claim=False,
+                claim_checks=[
+                    {
+                        "claim": "The response says it cannot determine the answer.",
+                        "claim_type": "non_claim",
+                        "support_status": "supported",
+                        "fine_label": "IR",
+                        "evidence_source": "none",
+                    },
+                    {
+                        "claim": "Yes.",
+                        "claim_type": "answer_claim",
+                        "support_status": "not_applicable",
+                        "fine_label": "OBJ",
+                        "evidence_source": "none",
+                    },
+                ],
+            )
+        )
+    )
+
+    assert details["is_hallucination"] is False
+    assert details["hallucination_labels"] == []
+    assert details["claim_checks"][0]["claim_type"] == "non_claim"
+    assert details["claim_checks"][0]["support_status"] == "not_applicable"
+    assert details["claim_checks"][0]["fine_label"] == "None"
+    assert details["claim_checks"][1]["fine_label"] == "None"
+
+
+def test_parse_judge_output_normalizes_unsupported_alias_and_preserves_audit_fields():
+    details = parse_judge_output(
+        json.dumps(
+            _judge_payload(
+                summary_consistent_with_claims=False,
+                aggregation_rule="claim_checks_source_of_truth",
+                claim_checks=[
+                    {
+                        "claim": "There is a dog in the image.",
+                        "claim_type": "object_claim",
+                        "support_status": "unsupported",
+                        "fine_label": "OBJ",
+                        "evidence_source": "image",
+                    }
+                ],
+            )
+        )
+    )
+
+    assert details["is_hallucination"] is True
+    assert details["hallucination_labels"] == ["OBJ"]
+    assert details["claim_checks"][0]["support_status"] == "unverifiable"
+    assert details["claim_checks"][0]["evidence_source"] == "image"
+    assert details["summary_consistent_with_claims"] is False
+    assert details["aggregation_rule"] == "claim_checks_source_of_truth"
+
+
+def test_parse_judge_output_normalizes_claim_type_aliases():
+    details = parse_judge_output(
+        json.dumps(
+            _judge_payload(
+                is_hallucination=False,
+                hallucination_vector=[0, 0, 0, 0, 0, 0, 0],
+                hallucination_labels=[],
+                primary_label="None",
+                unsupported_visual_claim=False,
+                claim_checks=[
+                    {
+                        "claim": "Yes.",
+                        "claim_type": "answer-claim",
+                        "support_status": "contradicted",
+                        "fine_label": "None",
+                    },
+                    {
+                        "claim": "The response gives formatting text.",
+                        "claim_type": "non-claim",
+                        "support_status": "supported",
+                        "fine_label": "IR",
+                    },
+                    {
+                        "claim": "There is a dog in the image.",
+                        "claim_type": "object claim",
+                        "support_status": "contradicted",
+                        "fine_label": "None",
+                    },
+                ],
+            )
+        )
+    )
+
+    assert details["is_hallucination"] is True
+    assert details["hallucination_labels"] == ["OBJ"]
+    assert details["claim_checks"][0]["claim_type"] == "answer_claim"
+    assert details["claim_checks"][0]["fine_label"] == "None"
+    assert details["claim_checks"][1]["claim_type"] == "non_claim"
+    assert details["claim_checks"][1]["support_status"] == "not_applicable"
+    assert details["claim_checks"][1]["fine_label"] == "None"
+    assert details["claim_checks"][2]["claim_type"] == "object_claim"
+    assert details["claim_checks"][2]["fine_label"] == "OBJ"
 
 
 def test_parse_judge_output_derives_fine_label_from_claim_type():
