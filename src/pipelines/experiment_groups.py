@@ -7,7 +7,7 @@ from typing import Literal
 
 DatasetName = Literal["pope", "mathvista", "xlrs_bench"]
 PromptName = Literal["direct", "cot"]
-ModelName = Literal["gemini", "qwen"]
+ModelName = Literal["gemini", "qwen", "gpt54"]
 StageName = Literal["responses", "detectors", "all", "validate"]
 
 
@@ -160,28 +160,28 @@ ONE_TENTH_INFERENCE_GROUPS: tuple[InferenceGroup, ...] = (
 XLRS_PILOT_INFERENCE_GROUPS: tuple[InferenceGroup, ...] = (
     InferenceGroup(
         experiment="xlrs_pilot",
-        run_id="xlrs_pilot_xlrs_bench_gemini_direct_v1",
+        run_id="xlrs_pilot_xlrs_bench_gpt54_direct_v1",
         dataset_path="data/processed/xlrs_eval.jsonl",
         prompt_path="prompts/answer/direct_xlrs.txt",
-        output_path="outputs/model_responses/xlrs_pilot_xlrs_bench_gemini_direct.jsonl",
-        provider="gemini_local",
+        output_path="outputs/model_responses/xlrs_pilot_xlrs_bench_gpt54_direct.jsonl",
+        provider="gpt54_local",
         limit=100,
         max_tokens=512,
         dataset="xlrs_bench",
-        model="gemini",
+        model="gpt54",
         prompt="direct",
     ),
     InferenceGroup(
         experiment="xlrs_pilot",
-        run_id="xlrs_pilot_xlrs_bench_gemini_cot_v1",
+        run_id="xlrs_pilot_xlrs_bench_gpt54_cot_v1",
         dataset_path="data/processed/xlrs_eval.jsonl",
         prompt_path="prompts/answer/evidence_grounded_cot_xlrs.txt",
-        output_path="outputs/model_responses/xlrs_pilot_xlrs_bench_gemini_cot.jsonl",
-        provider="gemini_local",
+        output_path="outputs/model_responses/xlrs_pilot_xlrs_bench_gpt54_cot.jsonl",
+        provider="gpt54_local",
         limit=100,
         max_tokens=512,
         dataset="xlrs_bench",
-        model="gemini",
+        model="gpt54",
         prompt="cot",
     ),
     InferenceGroup(

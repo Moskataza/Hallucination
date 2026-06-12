@@ -530,7 +530,9 @@ def test_count_completed_target_samples_uses_existing_target_sample_ids(tmp_path
     assert count_completed_target_prefix(group) == 1
 
 
-def test_count_completed_target_samples_accepts_existing_qwen_provider_rows(tmp_path: Path):
+def test_count_completed_target_samples_accepts_existing_qwen_provider_rows(
+    tmp_path: Path,
+):
     dataset = tmp_path / "samples.jsonl"
     output = tmp_path / "responses.jsonl"
     write_jsonl(dataset, [{"sample_id": "sample_0", "dataset": "pope"}])
@@ -632,7 +634,6 @@ def test_run_inference_provider_model_agnostic_resume_accepts_existing_qwen_vari
     assert rows[0]["inference_metadata"]["provider"] == "openrouter_qwen3_vl_instruct"
     assert rows[0]["inference_metadata"]["max_tokens"] == 512
     assert calls == []
-
 
 
 def test_run_inference_concurrent_resume_skips_existing_samples(
@@ -790,7 +791,6 @@ def test_run_inference_concurrent_provider_model_agnostic_resume_preserves_qwen_
     assert len(calls) == 1
 
 
-
 def test_run_inference_strict_resume_rejects_gemini_provider_variant(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -856,7 +856,6 @@ def test_run_inference_strict_resume_rejects_gemini_provider_variant(
     assert len(rows) == 1
     assert rows[0]["inference_metadata"]["provider"] == "gemini_local"
     assert len(calls) == 1
-
 
 
 def test_run_inference_resume_retries_and_replaces_failed_rows(
@@ -1803,6 +1802,7 @@ def test_provider_configs():
     thinking = get_provider_config("openrouter_qwen3_vl_thinking")
 
     assert gemini.default_model == "gemini-2.5-flash"
+    assert gemini.base_url_env is None
     assert gpt54.default_model == "gpt-5.4-mini"
     assert gpt54.api_key_env == "CHATGPT_LOCAL_KEY"
     assert gpt54.base_url_env == "GPT54_LOCAL_BASE_URL"

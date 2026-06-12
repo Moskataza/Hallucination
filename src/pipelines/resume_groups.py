@@ -15,7 +15,11 @@ from src.models.run_inference import (
     resolve_prompt_type,
     run_inference,
 )
-from src.pipelines.experiment_groups import DetectorGroup, INFERENCE_GROUPS, InferenceGroup
+from src.pipelines.experiment_groups import (
+    DetectorGroup,
+    INFERENCE_GROUPS,
+    InferenceGroup,
+)
 from src.pipelines.jsonl_outputs import OutputStatus
 from src.pipelines.result_store import (
     inspect_detector_group,
@@ -33,7 +37,8 @@ def count_completed_target_prefix(group: InferenceGroup) -> int:
     if not Path(group.output_path).exists():
         return 0
     rows_by_sample = {
-        str(row.get("sample_id", "")): row for row in read_json_records(group.output_path)
+        str(row.get("sample_id", "")): row
+        for row in read_json_records(group.output_path)
     }
     completed = 0
     for sample_id in target_sample_ids(group):
@@ -171,7 +176,9 @@ def _resume_inference_groups_locked(
             return
         if not ran_chunk:
             stalled = "; ".join(stalled_groups)
-            raise RuntimeError(f"Resume stalled for all pending response groups: {stalled}")
+            raise RuntimeError(
+                f"Resume stalled for all pending response groups: {stalled}"
+            )
 
 
 def resume_detector_groups(
@@ -299,6 +306,7 @@ def _resume_detector_groups_locked(
                     output_path=group.output_path,
                     provider=group.provider,
                     run_id=group.run_id,
+                    model=None,
                     limit=target_limit,
                     offset=group.offset,
                     resume=not group_overwrite,
@@ -335,7 +343,9 @@ def _resume_detector_groups_locked(
             return
         if not ran_chunk:
             stalled = "; ".join(stalled_groups)
-            raise RuntimeError(f"Resume stalled for all pending detector groups: {stalled}")
+            raise RuntimeError(
+                f"Resume stalled for all pending detector groups: {stalled}"
+            )
 
 
 def _detector_group_status(group: DetectorGroup, *, overwrite: bool) -> OutputStatus:

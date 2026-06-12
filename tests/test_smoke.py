@@ -45,6 +45,38 @@ def test_parse_cot_response_extracts_bold_wrapped_numbered_sections():
     assert parsed.final_answer == "Yes"
 
 
+def test_parse_cot_response_extracts_markdown_heading_numbered_sections():
+    parsed = parse_cot_response(
+        "### 1. Visual Evidence:\n"
+        "- A dog is visible.\n"
+        "### 2. Reasoning:\n"
+        "- The dog supports answering yes.\n"
+        "### 3. Final Answer:\n"
+        "Yes"
+    )
+
+    assert parsed.parse_status == "ok"
+    assert parsed.visual_evidence == "- A dog is visible."
+    assert parsed.reasoning == "- The dog supports answering yes."
+    assert parsed.final_answer == "Yes"
+
+
+def test_parse_cot_response_extracts_markdown_heading_bold_numbered_sections():
+    parsed = parse_cot_response(
+        "### **1. Visual Evidence:**\n"
+        "- A dog is visible.\n"
+        "### 2. **Reasoning:**\n"
+        "- The dog supports answering yes.\n"
+        "### **3. Final Answer:**\n"
+        "Yes"
+    )
+
+    assert parsed.parse_status == "ok"
+    assert parsed.visual_evidence == "- A dog is visible."
+    assert parsed.reasoning == "- The dog supports answering yes."
+    assert parsed.final_answer == "Yes"
+
+
 def test_normalize_yes_no():
     assert normalize_yes_no("Final Answer: Yes") == "yes"
     assert normalize_yes_no("No, there is not.") == "no"

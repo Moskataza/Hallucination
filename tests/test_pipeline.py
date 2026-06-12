@@ -28,6 +28,165 @@ def test_select_inference_groups_filters_registered_experiment() -> None:
     }
 
 
+def test_xlrs_pilot_uses_gpt54_instead_of_gemini() -> None:
+    gpt54_groups = select_inference_groups(
+        experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"gpt54"}
+    )
+    gemini_groups = select_inference_groups(
+        experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"gemini"}
+    )
+
+    assert {group.run_id for group in gpt54_groups} == {
+        "xlrs_pilot_xlrs_bench_gpt54_direct_v1",
+        "xlrs_pilot_xlrs_bench_gpt54_cot_v1",
+    }
+    assert {group.provider for group in gpt54_groups} == {"gpt54_local"}
+    assert gemini_groups == []
+
+
+def test_xlrs_pilot_detector_groups_use_gpt54_response_paths() -> None:
+    gpt54_groups = select_detector_groups(
+        experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"gpt54"}
+    )
+    gemini_groups = select_detector_groups(
+        experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"gemini"}
+    )
+
+    assert {group.run_id for group in gpt54_groups} == {
+        "xlrs_pilot_xlrs_bench_gpt54_direct_zero_shot_gpt54_v2",
+        "xlrs_pilot_xlrs_bench_gpt54_cot_zero_shot_gpt54_v2",
+    }
+    assert {group.responses_path for group in gpt54_groups} == {
+        "outputs/model_responses/xlrs_pilot_xlrs_bench_gpt54_direct.jsonl",
+        "outputs/model_responses/xlrs_pilot_xlrs_bench_gpt54_cot.jsonl",
+    }
+    assert {group.output_path for group in gpt54_groups} == {
+        "outputs/detector_results/xlrs_pilot_xlrs_bench_gpt54_direct_zero_shot_v2.jsonl",
+        "outputs/detector_results/xlrs_pilot_xlrs_bench_gpt54_cot_zero_shot_v2.jsonl",
+    }
+    assert {group.model for group in gpt54_groups} == {"gpt54"}
+    assert {group.provider for group in gpt54_groups} == {"gpt54_local"}
+    assert gemini_groups == []
+
+
+def test_stable_pipeline_cli_accepts_xlrs_gpt54_validate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    samples = tmp_path / "samples.jsonl"
+    direct = tmp_path / "direct.jsonl"
+    cot = tmp_path / "cot.jsonl"
+    direct_detector = tmp_path / "direct_detector.jsonl"
+    cot_detector = tmp_path / "cot_detector.jsonl"
+    for path in (samples, direct, cot, direct_detector, cot_detector):
+        write_jsonl(path, [_sample_row("sample_0")])
+
+    inference_groups = select_inference_groups(
+        experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"gpt54"}
+    )
+    detector_groups = select_detector_groups(
+        experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"gpt54"}
+    )
+    inference_by_prompt = {group.prompt: group for group in inference_groups}
+    detector_by_prompt = {group.prompt: group for group in detector_groups}
+    patched_inference_groups = [
+        InferenceGroup(
+            **{
+                **inference_by_prompt["direct"].__dict__,
+                "dataset_path": str(samples),
+                "output_path": str(direct),
+            }
+        ),
+        InferenceGroup(
+            **{
+                **inference_by_prompt["cot"].__dict__,
+                "dataset_path": str(samples),
+                "output_path": str(cot),
+            }
+        ),
+    ]
+    patched_detector_groups = [
+        DetectorGroup(
+            **{
+                **detector_by_prompt["direct"].__dict__,
+                "samples_path": str(samples),
+                "responses_path": str(direct),
+                "output_path": str(direct_detector),
+            }
+        ),
+        DetectorGroup(
+            **{
+                **detector_by_prompt["cot"].__dict__,
+                "samples_path": str(samples),
+                "responses_path": str(cot),
+                "output_path": str(cot_detector),
+            }
+        ),
+    ]
+
+    inspected_inference = []
+    inspected_detectors = []
+
+    class Status:
+        valid = 0
+        missing = 0
+        invalid = 0
+        duplicates = 0
+        complete = True
+        missing_examples = ()
+        invalid_examples = ()
+
+    class PipelineStatus:
+        status = Status()
+
+    def inspect_inference(group: InferenceGroup) -> PipelineStatus:
+        inspected_inference.append(group.run_id)
+        return PipelineStatus()
+
+    def inspect_detector(group: DetectorGroup) -> PipelineStatus:
+        inspected_detectors.append(group.run_id)
+        return PipelineStatus()
+
+    monkeypatch.setattr(
+        run_stable_pipeline,
+        "select_inference_groups",
+        lambda **kwargs: patched_inference_groups,
+    )
+    monkeypatch.setattr(
+        run_stable_pipeline,
+        "select_detector_groups",
+        lambda **kwargs: patched_detector_groups,
+    )
+    monkeypatch.setattr(
+        run_stable_pipeline, "inspect_inference_group", inspect_inference
+    )
+    monkeypatch.setattr(run_stable_pipeline, "inspect_detector_group", inspect_detector)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_stable_pipeline",
+            "--experiment",
+            "xlrs_pilot",
+            "--dataset",
+            "xlrs_bench",
+            "--model",
+            "gpt54",
+            "--stage",
+            "validate",
+        ],
+    )
+
+    run_stable_pipeline.main()
+
+    assert inspected_inference == [
+        "xlrs_pilot_xlrs_bench_gpt54_direct_v1",
+        "xlrs_pilot_xlrs_bench_gpt54_cot_v1",
+    ]
+    assert inspected_detectors == [
+        "xlrs_pilot_xlrs_bench_gpt54_direct_zero_shot_gpt54_v2",
+        "xlrs_pilot_xlrs_bench_gpt54_cot_zero_shot_gpt54_v2",
+    ]
+
+
 def test_final_validation_reports_only_completed_stage(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -600,6 +759,7 @@ def test_detector_resume_accepts_qwen_provider_model_variants(
     resume_detector_groups([group], chunk_size=1)
 
     assert [call["run_id"] for call in calls] == ["judge_run"]
+    assert calls[0]["model"] is None
 
 
 def test_inference_resume_refuses_locked_output(

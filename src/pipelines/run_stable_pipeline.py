@@ -27,7 +27,7 @@ def main() -> None:
     parser.add_argument(
         "--dataset", action="append", choices=["pope", "mathvista", "xlrs_bench"]
     )
-    parser.add_argument("--model", action="append", choices=["gemini", "qwen"])
+    parser.add_argument("--model", action="append", choices=["gemini", "qwen", "gpt54"])
     parser.add_argument("--prompt", action="append", choices=["direct", "cot"])
     parser.add_argument("--detector", action="append", choices=["zero_shot"])
     parser.add_argument("--version", action="append", dest="versions")
