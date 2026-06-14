@@ -1,0 +1,14 @@
+Based only on the visible remote sensing evidence, answer the question.
+
+Please provide:
+1. Visual Evidence: list the visible facts needed to answer the question. Mark the evidence source when possible, such as [original full image], [SR full image], or [SR tile r2c3].
+2. SR Consistency Check: state what is confirmed by the original image, what is visible only in the SR image or local tile, and whether any detail could be a super-resolution artifact.
+3. Reasoning: explain how the grounded evidence supports the answer.
+4. Final Answer: give the final answer in a concise form.
+
+If the image does not provide enough evidence, state that it is uncertain.
+Do not introduce objects, attributes, spatial relations, functions, land-use purposes, or intentions that are not visible in the image.
+Do not treat super-resolution sharpening, checkerboard patterns, artificial texture, or enhanced edges as real roads, buildings, vehicles, vegetation, or boundaries.
+If original and SR evidence conflict, prefer uncertainty over a strong conclusion.
+
+Question: {question}

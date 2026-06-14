@@ -212,14 +212,50 @@ XLRS_PILOT_INFERENCE_GROUPS: tuple[InferenceGroup, ...] = (
     ),
 )
 
+
+XLRS_SR_VARIANTS: tuple[str, ...] = ("original", "sr", "paired")
+XLRS_SR_MODELS: tuple[ModelName, ...] = ("gpt54", "qwen")
+XLRS_SR_PROMPTS: tuple[PromptName, ...] = ("direct", "cot")
+
+XLRS_SR_INFERENCE_GROUPS: tuple[InferenceGroup, ...] = tuple(
+    InferenceGroup(
+        experiment="xlrs_sr",
+        run_id=f"xlrs_sr_{variant}_xlrs_bench_{model}_{prompt}_v1",
+        dataset_path=f"data/processed/xlrs_eval_{variant}.jsonl",
+        prompt_path=(
+            "prompts/answer/direct_xlrs_sr.txt"
+            if prompt == "direct"
+            else "prompts/answer/evidence_grounded_cot_xlrs_sr.txt"
+        ),
+        output_path=(
+            f"outputs/model_responses/xlrs_sr_{variant}_xlrs_bench_"
+            f"{model}_{prompt}.jsonl"
+        ),
+        provider="gpt54_local" if model == "gpt54" else "qwen",
+        limit=100,
+        max_tokens=512,
+        dataset="xlrs_bench",
+        model=model,
+        prompt=prompt,
+    )
+    for variant in XLRS_SR_VARIANTS
+    for model in XLRS_SR_MODELS
+    for prompt in XLRS_SR_PROMPTS
+)
+
 INFERENCE_GROUPS: tuple[InferenceGroup, ...] = (
-    ONE_TENTH_INFERENCE_GROUPS + XLRS_PILOT_INFERENCE_GROUPS
+    ONE_TENTH_INFERENCE_GROUPS + XLRS_PILOT_INFERENCE_GROUPS + XLRS_SR_INFERENCE_GROUPS
 )
 
 
 def _detector_output_path(group: InferenceGroup) -> str:
-    suffix = f"{group.experiment}_{group.dataset}_{group.model}_{group.prompt}_zero_shot_v2.jsonl"
-    return f"outputs/detector_results/{suffix}"
+    return f"outputs/detector_results/{_run_stem(group.run_id)}_zero_shot_v2.jsonl"
+
+
+def _run_stem(run_id: str) -> str:
+    if run_id.endswith("_v1"):
+        return run_id[:-3]
+    return run_id
 
 
 DETECTOR_GROUPS: tuple[DetectorGroup, ...] = tuple(

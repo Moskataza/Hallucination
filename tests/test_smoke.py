@@ -1,4 +1,9 @@
+from pathlib import Path
+
+import pytest
+
 from src.datasets.convert_pope import convert_pope_record
+from src.datasets.prepare_xlrs_sr import prepare_xlrs_sr_record
 from src.datasets.schema import ModelResponse, ParsedResponse
 from src.detectors.pope_rule_based import detect_pope_hallucination
 from src.evaluation.agreement import cohens_kappa, matthews_corrcoef
@@ -75,6 +80,69 @@ def test_parse_cot_response_extracts_markdown_heading_bold_numbered_sections():
     assert parsed.visual_evidence == "- A dog is visible."
     assert parsed.reasoning == "- The dog supports answering yes."
     assert parsed.final_answer == "Yes"
+
+
+def test_parse_xlrs_sr_cot_response_extracts_final_answer():
+    parsed = parse_cot_response(
+        "1. Visual Evidence:\n"
+        "- [SR tile r1c2] A narrow road is visible.\n"
+        "2. SR Consistency Check:\n"
+        "- The road is also weakly visible in the original image.\n"
+        "3. Reasoning:\n"
+        "The paired evidence supports the answer.\n"
+        "4. Final Answer:\n"
+        "Yes"
+    )
+
+    assert parsed.parse_status == "ok"
+    assert "[SR tile r1c2]" in parsed.visual_evidence
+    assert parsed.reasoning == "The paired evidence supports the answer."
+    assert parsed.final_answer == "Yes"
+
+
+def test_prepare_xlrs_sr_record_selects_variant_image_and_metadata():
+    record = {
+        "id": "001",
+        "question": "Is there a small vehicle near the road?",
+        "answer": "yes",
+        "image": "default/001.png",
+        "original_image_path": "original/001.png",
+        "sr_image_path": "sr/001.png",
+        "paired_image_path": "paired/001.png",
+        "sr_scale": 4,
+        "sr_method": "example-sr",
+        "tile_manifest_path": "tiles/001.json",
+    }
+
+    sample = prepare_xlrs_sr_record(record, variant="paired", image_root="data/xlrs")
+
+    assert sample.sample_id == "xlrs_001_paired"
+    assert Path(sample.image_path) == Path("data/xlrs/paired/001.png")
+    assert Path(sample.metadata["original_image_path"]) == Path(
+        "data/xlrs/original/001.png"
+    )
+    assert Path(sample.metadata["sr_image_path"]) == Path("data/xlrs/sr/001.png")
+    assert Path(sample.metadata["paired_image_path"]) == Path(
+        "data/xlrs/paired/001.png"
+    )
+    assert sample.metadata["sr_scale"] == 4
+    assert sample.metadata["sr_method"] == "example-sr"
+    assert sample.metadata["tile_manifest_path"] == "tiles/001.json"
+    assert sample.metadata["xlrs_sr_variant"] == "paired"
+    assert sample.metadata["evidence_protocol"] == "sr_aware_multiscale"
+
+
+def test_prepare_xlrs_sr_record_requires_sr_specific_image():
+    record = {
+        "id": "001",
+        "question": "Is there a small vehicle near the road?",
+        "answer": "yes",
+        "image": "default/001.png",
+        "original_image_path": "original/001.png",
+    }
+
+    with pytest.raises(ValueError, match="SR variant requires"):
+        prepare_xlrs_sr_record(record, variant="sr", image_root="data/xlrs")
 
 
 def test_normalize_yes_no():

@@ -69,6 +69,51 @@ def test_xlrs_pilot_detector_groups_use_gpt54_response_paths() -> None:
     assert gemini_groups == []
 
 
+def test_xlrs_sr_registers_original_sr_and_paired_groups() -> None:
+    groups = select_inference_groups(
+        experiments={"xlrs_sr"}, datasets={"xlrs_bench"}, models={"gpt54"}
+    )
+
+    assert {group.run_id for group in groups} == {
+        "xlrs_sr_original_xlrs_bench_gpt54_direct_v1",
+        "xlrs_sr_original_xlrs_bench_gpt54_cot_v1",
+        "xlrs_sr_sr_xlrs_bench_gpt54_direct_v1",
+        "xlrs_sr_sr_xlrs_bench_gpt54_cot_v1",
+        "xlrs_sr_paired_xlrs_bench_gpt54_direct_v1",
+        "xlrs_sr_paired_xlrs_bench_gpt54_cot_v1",
+    }
+    assert {group.dataset_path for group in groups} == {
+        "data/processed/xlrs_eval_original.jsonl",
+        "data/processed/xlrs_eval_sr.jsonl",
+        "data/processed/xlrs_eval_paired.jsonl",
+    }
+    assert {group.prompt_path for group in groups} == {
+        "prompts/answer/direct_xlrs_sr.txt",
+        "prompts/answer/evidence_grounded_cot_xlrs_sr.txt",
+    }
+    assert {group.provider for group in groups} == {"gpt54_local"}
+
+
+def test_xlrs_sr_detector_paths_keep_variant_names() -> None:
+    groups = select_detector_groups(
+        experiments={"xlrs_sr"},
+        datasets={"xlrs_bench"},
+        models={"qwen"},
+        prompts={"cot"},
+    )
+
+    assert {group.output_path for group in groups} == {
+        "outputs/detector_results/xlrs_sr_original_xlrs_bench_qwen_cot_zero_shot_v2.jsonl",
+        "outputs/detector_results/xlrs_sr_sr_xlrs_bench_qwen_cot_zero_shot_v2.jsonl",
+        "outputs/detector_results/xlrs_sr_paired_xlrs_bench_qwen_cot_zero_shot_v2.jsonl",
+    }
+    assert {group.responses_path for group in groups} == {
+        "outputs/model_responses/xlrs_sr_original_xlrs_bench_qwen_cot.jsonl",
+        "outputs/model_responses/xlrs_sr_sr_xlrs_bench_qwen_cot.jsonl",
+        "outputs/model_responses/xlrs_sr_paired_xlrs_bench_qwen_cot.jsonl",
+    }
+
+
 def test_stable_pipeline_cli_accepts_xlrs_gpt54_validate(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
