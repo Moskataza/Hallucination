@@ -1,3 +1,5 @@
+"""读取 JSON/JSONL 记录并以 JSONL 格式写出。"""
+
 from __future__ import annotations
 
 import json
@@ -7,6 +9,7 @@ from typing import Any
 
 
 def read_json_records(path: str | Path) -> Iterator[dict[str, Any]]:
+    """兼容读取单个 JSON 对象、JSON 数组或逐行 JSON 记录。"""
     input_path = Path(path)
     text = input_path.read_text(encoding="utf-8").strip()
     if not text:
@@ -15,6 +18,7 @@ def read_json_records(path: str | Path) -> Iterator[dict[str, Any]]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
+        # 整体 JSON 解析失败时再按 JSONL 逐行解析，兼容两类输入格式。
         yield from _read_line_delimited_json(input_path, text)
         return
 
@@ -33,10 +37,12 @@ def read_json_records(path: str | Path) -> Iterator[dict[str, Any]]:
 
 
 def read_jsonl(path: str | Path) -> Iterator[dict[str, Any]]:
+    """保留 JSONL 语义的轻量入口，内部复用通用 JSON 读取。"""
     yield from read_json_records(path)
 
 
 def write_jsonl(path: str | Path, rows: Iterable[dict[str, Any]]) -> None:
+    """逐行写出 JSON 对象，并保持中文等非 ASCII 字符可读。"""
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as file:

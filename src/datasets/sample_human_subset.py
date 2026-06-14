@@ -1,3 +1,5 @@
+"""按数据集、模型和 prompt 分组抽取人工标注子集。"""
+
 from __future__ import annotations
 
 import argparse
@@ -9,6 +11,7 @@ from src.datasets.jsonl import read_jsonl, write_jsonl
 
 
 def sample_human_subset(rows: list[dict[str, Any]], per_group: int, seed: int = 42) -> list[dict[str, Any]]:
+    """在每个数据集-模型-prompt 组内随机抽取固定数量样本。"""
     rng = random.Random(seed)
     groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:

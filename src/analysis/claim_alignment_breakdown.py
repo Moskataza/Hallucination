@@ -1,3 +1,5 @@
+"""按数据集、prompt、细粒度标签等维度拆解 Human-as-Judge 对齐结果。"""
+
 from __future__ import annotations
 
 import argparse
@@ -37,6 +39,7 @@ _ALIGNMENT_COLUMNS = [
 def build_breakdown_tables(
     annotations: list[dict[str, Any]], key_rows: list[dict[str, Any]]
 ) -> dict[str, list[dict[str, Any]]]:
+    """构建按不同维度拆分的人工标注对齐表。"""
     joined = join_annotations_with_key(annotations, key_rows)
     return {
         "dataset_breakdown": _single_dimension_rows(joined, "dataset"),
@@ -54,6 +57,7 @@ def write_breakdown_tables(
     key_rows: list[dict[str, Any]],
     output_dir: str | Path,
 ) -> dict[str, Path]:
+    """写出所有拆分表，供后续报告或论文分析使用。"""
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     tables = build_breakdown_tables(annotations, key_rows)
@@ -110,6 +114,7 @@ def _detector_has_label(row: dict[str, Any], label: str) -> bool:
 
 
 def _detector_fine_labels(row: dict[str, Any]) -> set[str]:
+    """从规范化字段、原始 judge JSON 或 taxonomy 中恢复 detector 细粒度标签。"""
     normalized_labels = row.get("detector_hallucination_labels")
     if isinstance(normalized_labels, list):
         return {str(label) for label in normalized_labels if str(label) in _FINE_LABELS}
@@ -144,6 +149,7 @@ def _raw_hallucination_labels(raw_response: Any) -> set[str]:
 def _alignment_row(
     rows: list[dict[str, Any]], breakdown: str, value: str
 ) -> dict[str, Any]:
+    """把一个子集转换为混淆矩阵、Kappa 和 MCC 等对齐指标。"""
     metrics = compute_binary_alignment(rows)
     tp = int(metrics["tp"])
     fp = int(metrics["fp"])

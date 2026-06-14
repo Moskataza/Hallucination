@@ -11,6 +11,7 @@ _DETECTOR_RESULT_NAMES = {
 
 
 def detector_result_name(detector: str) -> str:
+    """把命令行 detector 名称映射到结果文件中的 detector 字段。"""
     return _DETECTOR_RESULT_NAMES.get(detector, detector)
 
 
@@ -27,6 +28,7 @@ def is_response_row_compatible(
     max_tokens: int,
     temperature: float,
 ) -> bool:
+    """检查旧模型回答行是否与当前推理配置完全一致。"""
     if not _matches_optional(row.get("run_id"), run_id):
         return False
     if not _matches_optional(row.get("dataset"), dataset):
@@ -62,6 +64,7 @@ def is_detector_row_compatible(
     prompt_type: str,
     judge_provider: str | None = None,
 ) -> bool:
+    """检查旧 detector 行是否与当前 detector 配置和 judge provider 一致。"""
     if not _matches_optional(row.get("run_id"), run_id):
         return False
     if not _matches_optional(row.get("detector"), detector_result_name(detector)):

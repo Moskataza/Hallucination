@@ -1,3 +1,5 @@
+"""使用 POPE yes/no 规则检测对象存在性幻觉。"""
+
 from __future__ import annotations
 
 import argparse
@@ -13,6 +15,7 @@ def detect_pope_hallucination(
     response: ModelResponse,
     run_id: str = "pope_rule_based_v1",
 ) -> DetectorResult:
+    """用 POPE 负例中模型回答 yes 的规则判定对象幻觉。"""
     reference = normalize_yes_no(sample.reference_answer)
     prediction = normalize_yes_no(response.parsed.final_answer or response.raw_response)
 
@@ -60,6 +63,7 @@ def detect_file(
     output_path: str | Path,
     allow_missing: bool = False,
 ) -> None:
+    """读取样本和模型回答文件，逐条生成 POPE 规则 detector 结果。"""
     samples = {row["sample_id"]: EvalSample.from_dict(row) for row in read_jsonl(samples_path)}
     results = []
     missing_sample_ids = []

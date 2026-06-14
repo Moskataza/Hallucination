@@ -251,6 +251,7 @@ def select_inference_groups(
     prompts: set[str] | None = None,
     versions: set[str] | None = None,
 ) -> list[InferenceGroup]:
+    """按实验、数据集、模型、prompt 和版本筛选 inference 组。"""
     return [
         group
         for group in INFERENCE_GROUPS
@@ -272,6 +273,7 @@ def select_detector_groups(
     versions: set[str] | None = None,
     responses_from: str | None = None,
 ) -> list[DetectorGroup]:
+    """按过滤条件筛选 detector 组，并可复用其他实验的 response 文件。"""
     groups = [
         group
         for group in DETECTOR_GROUPS

@@ -1,3 +1,5 @@
+"""将 MathVista 风格记录转换为统一评测样本格式。"""
+
 from __future__ import annotations
 
 import argparse
@@ -11,6 +13,7 @@ from src.datasets.schema import EvalSample
 def convert_mathvista_record(
     record: dict[str, Any], image_root: str | Path = ""
 ) -> EvalSample:
+    """把 MathVista 单条记录映射到统一 EvalSample。"""
     image_value = str(record.get("image", record.get("image_path", "")))
     image_path = (
         (Path(image_root) / image_value).as_posix()
@@ -40,6 +43,7 @@ def convert_mathvista_record(
 def convert_mathvista_file(
     input_path: str | Path, output_path: str | Path, image_root: str | Path = ""
 ) -> None:
+    """批量转换 MathVista JSONL 并写出统一样本文件。"""
     samples = (
         convert_mathvista_record(record, image_root).to_dict()
         for record in read_jsonl(input_path)

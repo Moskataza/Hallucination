@@ -1,9 +1,12 @@
+"""从 detector 结果中挑选代表性失败案例，便于人工检查。"""
+
 from __future__ import annotations
 
 from typing import Any
 
 
 def select_failure_cases(rows: list[dict[str, Any]], limit: int = 4) -> list[dict[str, Any]]:
+    """优先挑选检测为幻觉的样本，不足时用普通样本补齐。"""
     selected: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
 

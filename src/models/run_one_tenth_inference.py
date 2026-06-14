@@ -1,3 +1,5 @@
+"""恢复 one-tenth 实验的模型回答生成。"""
+
 from __future__ import annotations
 
 import argparse
@@ -19,12 +21,14 @@ ONE_TENTH_GROUPS = ONE_TENTH_INFERENCE_GROUPS
 
 
 def count_completed_target_samples(group: InferenceGroup) -> int:
+    """统计目标范围内已完成且有效的样本数量。"""
     target_ids = set(_target_sample_ids(group))
     existing_ids = _existing_sample_ids(group)
     return len(target_ids & existing_ids)
 
 
 def count_completed_target_prefix(group: InferenceGroup) -> int:
+    """统计从 offset 开始连续完成的样本前缀长度。"""
     existing_ids = _existing_sample_ids(group)
     completed = 0
     for sample_id in _target_sample_ids(group):
@@ -59,6 +63,7 @@ def select_groups(
     models: set[str] | None = None,
     prompts: set[str] | None = None,
 ) -> list[InferenceGroup]:
+    """按数据集、模型和 prompt 过滤 one-tenth inference 组。"""
     return select_inference_groups(
         experiments={"one_tenth"}, datasets=datasets, models=models, prompts=prompts
     )
@@ -73,6 +78,7 @@ def resume_groups(
     request_max_retries: int = 2,
     max_chunk_attempts: int = 3,
 ) -> None:
+    """按 chunk 恢复 one-tenth inference 组，遇到无进展时有限重试。"""
     if concurrency < 1:
         raise ValueError("concurrency must be at least 1")
     if request_timeout_seconds < 1:

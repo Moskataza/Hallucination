@@ -185,6 +185,7 @@ _JUDGE_RESPONSE_FORMAT = {
 
 
 class JudgeClient(Protocol):
+    """描述 judge 所需的最小多模态 chat completion 接口，便于测试替换。"""
     def chat_completion(
         self,
         *,
@@ -241,6 +242,7 @@ def normalize_judge_payload(payload: dict[str, Any]) -> dict[str, Any]:
     raw_claim_checks = payload.get("claim_checks")
     has_claim_checks = isinstance(raw_claim_checks, list)
     claim_checks = _normalize_claim_checks(raw_claim_checks)
+    # 以 claim_checks 为主要依据重算标签，避免 judge 总结字段与逐 claim 结论不一致。
     labels = _labels_from_payload(payload, claim_checks, has_claim_checks)
     vector = [1 if label in labels else 0 for label in _LABEL_ORDER]
     normalized_labels = [label for label in _LABEL_ORDER if label in labels]
@@ -250,6 +252,7 @@ def normalize_judge_payload(payload: dict[str, Any]) -> dict[str, Any]:
     unsupported_visual_claim = _coerce_optional_bool(
         payload.get("unsupported_visual_claim")
     )
+    # 事实类细粒度标签意味着存在视觉或事实支撑问题，需要同步置位。
     if labels & FACTUAL_TYPES:
         unsupported_visual_claim = True
     if not labels and unsupported_visual_claim is None:
@@ -294,6 +297,7 @@ def details_to_detector_result(
     run_id: str,
     judge_provider: str | None = None,
 ) -> DetectorResult:
+    """把规范化 judge details 封装为统一 DetectorResult。"""
     details = dict(details)
     if judge_provider is not None:
         details["judge_provider"] = judge_provider
@@ -362,6 +366,7 @@ def build_failed_model_response_detector_result(
     *,
     run_id: str,
 ) -> DetectorResult:
+    """当模型回答本身失败时生成低置信度的 Unclear 判定。"""
     error = str(response.inference_metadata.get("error", "Model inference failed."))
     return _unclear_detector_result(
         sample,
@@ -379,6 +384,7 @@ def build_failed_judge_detector_result(
     run_id: str,
     error: Exception,
 ) -> DetectorResult:
+    """当 judge 调用失败时生成可落盘的 Unclear 判定。"""
     return _unclear_detector_result(
         sample,
         response,

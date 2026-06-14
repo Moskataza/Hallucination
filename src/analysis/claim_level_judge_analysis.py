@@ -1,3 +1,5 @@
+"""分析 zero-shot judge 的 claim 级输出，评估标签、证据来源和格式质量。"""
+
 from __future__ import annotations
 
 import argparse
@@ -106,6 +108,7 @@ _TABLE_COLUMNS = {
 def build_claim_level_tables(
     rows: list[dict[str, Any]]
 ) -> dict[str, list[dict[str, Any]]]:
+    """按实验组汇总 claim 级统计、分布和格式质量表。"""
     grouped: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped[_group_key(row)].append(row)
@@ -141,6 +144,7 @@ def build_claim_level_tables(
 def write_claim_level_tables(
     rows: list[dict[str, Any]], output_dir: str | Path
 ) -> dict[str, Path]:
+    """写出 claim 级分析的多张 CSV 表。"""
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     tables = build_claim_level_tables(rows)
@@ -155,6 +159,7 @@ def write_claim_level_tables(
 def _compute_group_stats(
     key: tuple[str, ...], rows: list[dict[str, Any]]
 ) -> dict[str, Any]:
+    """在单个实验组内统计 claim 数量、支持状态和格式异常。"""
     claim_counts = []
     total_claims = 0
     checkable_claims = 0
@@ -225,6 +230,7 @@ def _compute_group_stats(
             if evidence_source == "none":
                 none_evidence_source_count += 1
 
+            # 只有可验证 claim 进入分母，避免 non-claim 稀释 unsupported 比例。
             if claim_type != "non_claim" and support_status != "not_applicable":
                 checkable_claims += 1
             if support_status in _UNSUPPORTED_STATUSES:
@@ -305,6 +311,7 @@ def _distribution_rows(
 
 
 def _cot_exposure_rows(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """比较 direct 与 CoT 在 claim 暴露数量和未支持比例上的差异。"""
     by_group = {
         (
             str(row["detector"]),

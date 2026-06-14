@@ -70,6 +70,7 @@ PROVIDERS: dict[str, ProviderConfig] = {
 
 
 class OpenAICompatibleClient:
+    """封装 OpenAI-compatible 多模态请求的鉴权、payload 构造和重试。"""
     def __init__(
         self,
         config: ProviderConfig,
@@ -188,6 +189,7 @@ def build_chat_payload(
     provider_name: str | None = None,
     response_format: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """构造包含文本 prompt 和图片 data URL 的 chat completion payload。"""
     payload: dict[str, Any] = {
         "model": model,
         "messages": [
@@ -214,6 +216,7 @@ def build_chat_payload(
     if response_format is not None:
         payload["response_format"] = response_format
     if native_reasoning:
+        # reasoning 参数是 provider 私有扩展，仅在明确支持时附加。
         _add_native_reasoning_options(payload, reasoning_max_tokens, provider_name)
     return payload
 
@@ -237,6 +240,7 @@ def _add_native_reasoning_options(
 
 
 def extract_message_text(response: dict[str, Any]) -> str:
+    """从不同 provider 的 message.content 结构中提取可见文本。"""
     choices = response.get("choices") or []
     if not choices:
         return ""
@@ -258,6 +262,7 @@ def extract_message_text(response: dict[str, Any]) -> str:
 
 
 def extract_native_reasoning(response: dict[str, Any]) -> dict[str, Any]:
+    """提取 provider 返回的原生 reasoning 字段，供实验记录分析。"""
     choices = response.get("choices") or []
     if not choices:
         return {}
@@ -284,6 +289,7 @@ def _extract_gemini_thought_summary(content: Any) -> str:
 
 
 def get_provider_config(provider: str) -> ProviderConfig:
+    """根据 provider 名称取得配置，并在未知时给出可用列表。"""
     try:
         return PROVIDERS[provider]
     except KeyError as exc:

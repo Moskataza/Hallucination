@@ -86,6 +86,7 @@ def run_inference(
     allowed_image_root = (Path(path_base) / image_root).resolve()
 
     target_sample_ids = _target_sample_ids(dataset_path, offset=offset, limit=limit)
+    # 目标样本都已存在时仍做完整校验，防止旧配置结果被误复用。
     if target_sample_ids <= existing_sample_ids:
         _validate_completed_output(
             output,
@@ -365,6 +366,7 @@ def _build_failed_response_row(
     max_tokens: int,
     error: Exception,
 ) -> dict[str, Any]:
+    """把可恢复的 API 失败记录为空回答行，下一次 resume 会重新尝试。"""
     error_text = f"Inference failed after retries: {error}"
     response = ModelResponse(
         run_id=run_id,
@@ -431,6 +433,7 @@ def _target_sample_ids(
 
 
 def model_response_invalid_reason(row: dict[str, Any]) -> str | None:
+    """解释模型回答为何不能复用，供 resume 清理和结果校验使用。"""
     metadata = row.get("inference_metadata")
     if not isinstance(metadata, dict):
         metadata = {}
@@ -447,6 +450,7 @@ def model_response_invalid_reason(row: dict[str, Any]) -> str | None:
         return "raw response is empty"
     prompt_type = str(row.get("prompt_type", ""))
     if parsed.get("parse_status") != "ok" and prompt_type == "evidence_grounded_cot":
+        # 历史结果可能由旧解析器生成，校验时用当前解析器再尝试一次。
         reparsed = parse_response(str(row.get("raw_response", "")), prompt_type)
         if reparsed.parse_status == "ok":
             parsed = reparsed.to_dict()
@@ -647,6 +651,7 @@ def _infer_sample(
 def resolve_prompt_type(
     prompt_path: str | Path, prompt_type: str | None = None
 ) -> PromptType:
+    """根据 prompt 文件名推断 direct 或 evidence_grounded_cot 类型。"""
     inferred = _infer_prompt_type_from_path(prompt_path)
     if prompt_type is None:
         if inferred is None:
@@ -674,6 +679,7 @@ def _infer_prompt_type_from_path(prompt_path: str | Path) -> PromptType | None:
 
 
 def render_prompt(template: str, sample: dict[str, Any]) -> str:
+    """将样本字段填入回答生成 prompt 模板。"""
     choices = sample.get("choices")
     choices_text = ""
     if choices:
@@ -693,6 +699,7 @@ def render_prompt(template: str, sample: dict[str, Any]) -> str:
 def resolve_sample_image_path(
     image_path: str | Path, *, path_base: str | Path = "."
 ) -> Path:
+    """把样本中的相对图片路径解析到真实文件路径。"""
     path = Path(image_path)
     if path.is_absolute():
         return path.resolve()

@@ -1,3 +1,5 @@
+"""渲染 checklist judge 的提示词输入。"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,6 +14,7 @@ def render_checklist_judge_prompt(
     taxonomy_definition: str,
     template_path: str | Path = "prompts/judge/checklist_judge.txt",
 ) -> str:
+    """把样本、回答和 taxonomy 定义填入 checklist judge 模板。"""
     template = Path(template_path).read_text(encoding="utf-8")
     return render_prompt_template(
         template,

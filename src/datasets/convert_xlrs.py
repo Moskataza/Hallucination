@@ -1,3 +1,5 @@
+"""将 XLRS-Bench 风格记录转换为统一评测样本格式。"""
+
 from __future__ import annotations
 
 import argparse
@@ -14,9 +16,11 @@ _CHOICES_KEYS = ("choices", "options", "candidates")
 
 
 def convert_xlrs_record(record: dict[str, Any], image_root: str | Path = "") -> EvalSample:
+    """把 XLRS-Bench 单条记录映射到统一 EvalSample。"""
     image_value = _first_present(record, _IMAGE_KEYS, "")
     image_path = str(Path(image_root) / str(image_value)) if image_root and image_value else str(image_value)
     sample_id = record.get("sample_id", record.get("id", record.get("qid", image_value)))
+    # 保留未映射字段，便于后续追溯 XLRS 原始元数据。
     metadata = {k: v for k, v in record.items() if k not in {*_QUESTION_KEYS, *_ANSWER_KEYS, *_IMAGE_KEYS, *_CHOICES_KEYS}}
     return EvalSample(
         sample_id=f"xlrs_{sample_id}",
@@ -31,6 +35,7 @@ def convert_xlrs_record(record: dict[str, Any], image_root: str | Path = "") -> 
 
 
 def convert_xlrs_file(input_path: str | Path, output_path: str | Path, image_root: str | Path = "") -> None:
+    """批量转换 XLRS-Bench JSONL 并写出统一样本文件。"""
     samples = (convert_xlrs_record(record, image_root).to_dict() for record in read_jsonl(input_path))
     write_jsonl(output_path, samples)
 

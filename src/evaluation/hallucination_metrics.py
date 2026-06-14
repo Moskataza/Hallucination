@@ -1,3 +1,5 @@
+"""从 detector 结果中汇总幻觉率、类型分布和 grounded accuracy。"""
+
 from __future__ import annotations
 
 from collections import Counter
@@ -8,6 +10,7 @@ from src.detectors.taxonomy import FACTUAL_TYPES, LOGICAL_TYPES, normalize_fine_
 
 
 def compute_hallucination_metrics(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """汇总 detector 输出的幻觉数量、类型比例和 grounded accuracy。"""
     total = 0
     hallucinated = 0
     factual = 0

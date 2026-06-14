@@ -1,3 +1,5 @@
+"""从样本、模型回答和 detector 输出构建盲标人工标注集。"""
+
 from __future__ import annotations
 
 import argparse
@@ -96,6 +98,7 @@ def build_annotation_rows(
     source_file: str,
     strict: bool = True,
 ) -> list[dict[str, Any]]:
+    """连接样本、模型回答和 detector 结果，形成可盲标的候选行。"""
     samples_by_id = {str(row["sample_id"]): row for row in samples}
     responses_by_id = {_model_response_id(row): row for row in responses}
     joined: list[dict[str, Any]] = []
@@ -165,6 +168,7 @@ def sample_detector_validation_rows(
     per_group: int,
     seed: int = 42,
 ) -> list[dict[str, Any]]:
+    """按实验组均衡抽样，确保人工验证集覆盖正负样本和诊断样本。"""
     rng = random.Random(seed)
     groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -190,6 +194,7 @@ def write_annotation_outputs(
     *,
     overwrite: bool = False,
 ) -> None:
+    """写出盲标 CSV 和保留 detector 信息的 key JSONL。"""
     annotation_path = Path(annotation_output)
     key_path = Path(key_output)
     _ensure_can_write(annotation_path, overwrite)
@@ -228,6 +233,7 @@ def load_registered_annotation_rows(
     experiment: str,
     detector: str,
 ) -> list[dict[str, Any]]:
+    """按实验登记加载所有 detector 输出并转换为标注候选。"""
     rows: list[dict[str, Any]] = []
     for group in select_detector_groups(experiments={experiment}, detectors={detector}):
         samples = list(read_jsonl(group.samples_path))
@@ -245,6 +251,7 @@ def load_registered_annotation_rows(
 
 
 def summarize_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """统计每个分组的候选数量和 detector 正负例。"""
     groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         group_key = tuple(str(row.get(key, "")) for key in _GROUP_KEYS)
@@ -314,6 +321,7 @@ def _sample_group(
     per_group: int,
     rng: random.Random,
 ) -> list[dict[str, Any]]:
+    """在单组内优先抽取正负例，再补充低置信度或信息量高的诊断样本。"""
     selected: list[dict[str, Any]] = []
     used: set[str] = set()
 
@@ -340,6 +348,7 @@ def _sample_group(
             if taken >= count:
                 break
 
+    # 每组先保证 detector 正负例覆盖，再补充诊断样本提高人工验证价值。
     positives = [row for row in rows if row.get("detector_is_hallucination") is True]
     negatives = [row for row in rows if row.get("detector_is_hallucination") is False]
     target_binary = min(2, per_group)

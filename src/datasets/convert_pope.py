@@ -1,3 +1,5 @@
+"""将 POPE 原始记录转换为统一评测样本格式。"""
+
 from __future__ import annotations
 
 import argparse
@@ -13,6 +15,7 @@ def convert_pope_record(
     image_root: str | Path = "",
     split: str | None = None,
 ) -> EvalSample:
+    """把 POPE 单条记录映射到统一 EvalSample，并保留原始字段。"""
     image_name = str(record.get("image", ""))
     image_path = _join_image_path(image_root, image_name)
     question_id = record.get("question_id", record.get("id", image_name))
@@ -42,6 +45,7 @@ def convert_pope_file(
     image_root: str | Path = "",
     split: str | None = None,
 ) -> None:
+    """批量转换 POPE JSON/JSONL，并从路径推断 split。"""
     resolved_split = split or _infer_split_from_path(input_path)
     samples = (
         convert_pope_record(record, image_root, resolved_split).to_dict()

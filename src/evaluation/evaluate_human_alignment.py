@@ -1,3 +1,5 @@
+"""把人工标注与 detector key 连接，并输出对齐评估表。"""
+
 from __future__ import annotations
 
 import argparse
@@ -70,6 +72,7 @@ def build_alignment_outputs(
     annotations: list[dict[str, Any]],
     key_rows: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
+    """生成总体、分组、分歧、错误模式和标注质量输出。"""
     joined = join_annotations_with_key(annotations, key_rows)
     return {
         "overall_alignment": [_alignment_row(joined, {})],
@@ -86,6 +89,7 @@ def build_versioned_key_rows(
     *,
     source_file: str,
 ) -> list[dict[str, Any]]:
+    """把固定人工标注 key 迁移到新版本 detector 输出上。"""
     detector_by_response_id = _unique_index(detector_rows, "model_response_id")
     versioned_rows = []
     missing = []
@@ -133,6 +137,7 @@ def join_annotations_with_key(
     annotations: list[dict[str, Any]],
     key_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """按 annotation_id 或 response_id 合并盲标结果与隐藏 key。"""
     key_by_annotation_id = _unique_index(key_rows, "annotation_id")
     key_by_response_id = _unique_index(key_rows, "model_response_id")
     annotation_by_id = _unique_index(annotations, "annotation_id")
@@ -149,6 +154,7 @@ def join_annotations_with_key(
                 annotation_id or str(annotation.get("model_response_id", ""))
             )
             continue
+        # key 中保留 detector 隐藏字段，人工列只从盲标 CSV 回填。
         joined_row = dict(key)
         for column in _HUMAN_LABEL_COLUMNS:
             joined_row[column] = annotation.get(column, "")
@@ -177,6 +183,7 @@ def join_annotations_with_key(
 def write_alignment_outputs(
     outputs: dict[str, list[dict[str, Any]]], output_dir: str | Path
 ) -> dict[str, Path]:
+    """将对齐评估结果写成 CSV 或 JSONL。"""
     base = Path(output_dir)
     base.mkdir(parents=True, exist_ok=True)
     paths: dict[str, Path] = {}
@@ -211,6 +218,7 @@ def main() -> None:
 def _alignment_row(
     rows: list[dict[str, Any]], dimensions: dict[str, str]
 ) -> dict[str, Any]:
+    """把一个样本子集汇总为混淆矩阵和一致性指标。"""
     metrics = compute_binary_alignment(rows)
     tp = int(metrics["tp"])
     fp = int(metrics["fp"])

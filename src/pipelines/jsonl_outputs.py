@@ -18,6 +18,7 @@ KeyFunction = Callable[[dict[str, Any]], str]
 
 @dataclass(frozen=True)
 class OutputStatus:
+    """描述输出文件中目标 key 的有效、缺失、无效和重复数量。"""
     path: str
     total: int
     valid: int
@@ -34,6 +35,7 @@ class OutputStatus:
 
 
 def read_rows(path: str | Path) -> list[dict[str, Any]]:
+    """安全读取可选存在的 JSON/JSONL 输出文件。"""
     output = Path(path)
     if not output.exists():
         return []
@@ -55,6 +57,7 @@ def write_indexed_rows(
 
 
 def atomic_write_jsonl(output: str | Path, rows: Iterable[dict[str, Any]]) -> None:
+    """先写临时文件再替换目标文件，降低中断导致的半写风险。"""
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -99,6 +102,7 @@ def prepare_resume_rows(
         raise FileExistsError(
             f"Output already exists: {output_path}. Use --overwrite or --resume."
         )
+    # resume 前剔除无效旧行，避免失败占位或过期配置阻塞重跑。
     rows = [row for row in read_json_records(output_path) if not invalid_row(row)]
     write_indexed_rows(
         output_path,
@@ -153,6 +157,7 @@ def validate_complete_output(
     invalid_row: InvalidRowPredicate,
     label: str,
 ) -> None:
+    """校验输出覆盖所有目标 key，否则报告缺失、无效或重复示例。"""
     status = inspect_output(
         output, target_ids=target_ids, key_fn=key_fn, invalid_row=invalid_row
     )

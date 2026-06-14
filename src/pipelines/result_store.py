@@ -21,12 +21,14 @@ from src.pipelines.jsonl_outputs import OutputStatus, inspect_output
 
 @dataclass(frozen=True)
 class PipelineStatus:
+    """绑定 pipeline group 标识、阶段名称和输出完整性状态。"""
     group_id: str
     stage: str
     status: OutputStatus
 
 
 def target_sample_ids(group: InferenceGroup) -> list[str]:
+    """列出 inference group offset/limit 范围内的目标样本 id。"""
     return [
         str(sample["sample_id"])
         for index, sample in enumerate(read_json_records(group.dataset_path))
@@ -35,6 +37,7 @@ def target_sample_ids(group: InferenceGroup) -> list[str]:
 
 
 def target_response_ids(group: DetectorGroup) -> list[str]:
+    """列出 detector group 需要判定的模型回答 id。"""
     return [
         f"{row['run_id']}:{row['sample_id']}"
         for index, row in enumerate(read_json_records(group.responses_path))

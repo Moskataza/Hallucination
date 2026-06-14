@@ -1,3 +1,5 @@
+"""汇总 detector JSONL 结果，生成总体指标、CoT 效应和模型对比表。"""
+
 from __future__ import annotations
 
 import argparse
@@ -69,8 +71,10 @@ def group_detector_results(
     rows: list[dict[str, Any]],
     keys: tuple[str, ...] = _GROUP_KEYS,
 ) -> dict[tuple[str, ...], dict[str, Any]]:
+    """按 detector、数据集、模型和 prompt 分组后计算幻觉指标。"""
     groups: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
+        # 分组键缺失会导致跨实验结果混合，因此直接失败而不是静默归入空组。
         missing_keys = [
             key for key in keys if key not in row or row.get(key) in (None, "")
         ]
@@ -89,6 +93,7 @@ def group_detector_results(
 def build_experiment_tables(
     rows: list[dict[str, Any]]
 ) -> dict[str, list[dict[str, Any]]]:
+    """生成实验所需的总体、CoT、模型对比和 taxonomy 分布表。"""
     overall = build_overall_table(rows)
     return {
         "overall_results": overall,
@@ -99,6 +104,7 @@ def build_experiment_tables(
 
 
 def build_overall_table(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把每个实验组的指标展开成一行 CSV 友好的记录。"""
     grouped = group_detector_results(rows)
     table = []
     for (detector, dataset, model, prompt_type), metrics in sorted(grouped.items()):
@@ -130,6 +136,7 @@ def build_overall_table(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def build_cot_effect_table(overall_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """对齐同组 direct 与 CoT 结果，计算 CoT 带来的指标增量。"""
     by_group = {
         (
             str(row["detector"]),
@@ -159,6 +166,7 @@ def build_cot_effect_table(overall_rows: list[dict[str, Any]]) -> list[dict[str,
 def build_model_comparison_table(
     overall_rows: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
+    """在相同数据集和 prompt 下两两比较模型指标差异。"""
     groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in overall_rows:
         groups[
@@ -188,6 +196,7 @@ def build_model_comparison_table(
 def build_taxonomy_distribution_table(
     overall_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """抽取 hallucination taxonomy 的粗细粒度分布。"""
     table = []
     for row in overall_rows:
         table_row: dict[str, Any] = {
@@ -211,6 +220,7 @@ def build_taxonomy_distribution_table(
 def write_experiment_tables(
     rows: list[dict[str, Any]], output_dir: str | Path
 ) -> dict[str, Path]:
+    """将所有汇总表写入输出目录。"""
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     paths = {}

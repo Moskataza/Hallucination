@@ -1,3 +1,5 @@
+"""计算 detector 与人工标注的二分类对齐指标。"""
+
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -5,6 +7,7 @@ from typing import Any
 
 
 def compute_binary_alignment(rows: Iterable[dict[str, Any]], predicted_key: str = "predicted_is_hallucination", human_key: str = "human_is_hallucination") -> dict[str, float | int]:
+    """把 detector 与人工标签转成 TP/FP/TN/FN 及 precision、recall、F1。"""
     tp = fp = tn = fn = skipped = 0
     for row in rows:
         predicted = _to_bool_or_none(row.get(predicted_key))

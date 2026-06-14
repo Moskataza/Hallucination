@@ -1,3 +1,5 @@
+"""解析模型回答，统一 direct 与 CoT 输出中的最终答案。"""
+
 from __future__ import annotations
 
 import re
@@ -21,6 +23,7 @@ _UNCERTAIN_PATTERN = re.compile(
 
 
 def normalize_yes_no(text: str) -> str:
+    """把中英文 yes/no 和不确定表达归一为 yes、no 或 unclear。"""
     cleaned = text.strip()
     for pattern in _YES_PATTERNS:
         if pattern.search(cleaned):
@@ -39,6 +42,7 @@ def normalize_yes_no(text: str) -> str:
 
 
 def parse_direct_response(raw_response: str) -> ParsedResponse:
+    """direct prompt 下把完整回答视为最终答案。"""
     final_answer = raw_response.strip()
     if not final_answer:
         return ParsedResponse(parse_status="failed")
@@ -46,6 +50,7 @@ def parse_direct_response(raw_response: str) -> ParsedResponse:
 
 
 def parse_cot_response(raw_response: str) -> ParsedResponse:
+    """从 CoT 回答中抽取视觉证据、推理和 Final Answer。"""
     text = raw_response.strip()
     if not text:
         return ParsedResponse(parse_status="failed")
@@ -63,6 +68,7 @@ def parse_cot_response(raw_response: str) -> ParsedResponse:
             parse_status="ok",
         )
 
+    # 兼容未严格按模板输出的 CoT：保留最后一行作为可复核的弱解析结果。
     fallback = _last_nonempty_line(text)
     if fallback:
         return ParsedResponse(
@@ -78,6 +84,7 @@ def parse_cot_response(raw_response: str) -> ParsedResponse:
 
 
 def parse_response(raw_response: str, prompt_type: str) -> ParsedResponse:
+    """按 prompt 类型选择对应的回答解析策略。"""
     if prompt_type == "evidence_grounded_cot":
         return parse_cot_response(raw_response)
     return parse_direct_response(raw_response)

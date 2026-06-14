@@ -97,6 +97,7 @@ def main() -> None:
 
 
 def _print_final_validation(stage: str, inference_groups, detector_groups) -> None:
+    """根据实际运行阶段只打印相关输出的最终校验结果。"""
     print("FINAL_VALIDATE")
     if stage == "responses":
         _print_validation(inference_groups, [])
@@ -107,6 +108,7 @@ def _print_final_validation(stage: str, inference_groups, detector_groups) -> No
 
 
 def _print_validation(inference_groups, detector_groups) -> None:
+    """打印每个 inference 或 detector 组的完整性状态。"""
     for group in inference_groups:
         if not Path(group.dataset_path).exists():
             print(f"RESPONSES {group.run_id} dataset_missing={group.dataset_path}")
@@ -139,6 +141,7 @@ def _print_validation(inference_groups, detector_groups) -> None:
 
 
 def _parse_filter(values: list[str] | None) -> set[str] | None:
+    """把重复命令行参数转换为集合过滤器。"""
     if not values:
         return None
     return set(values)

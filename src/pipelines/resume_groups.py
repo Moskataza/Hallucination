@@ -30,10 +30,12 @@ from src.pipelines.result_store import (
 
 
 def count_completed_target_samples(group: InferenceGroup) -> int:
+    """返回 inference group 当前有效完成数量。"""
     return inspect_inference_group(group).status.valid
 
 
 def count_completed_target_prefix(group: InferenceGroup) -> int:
+    """返回 inference group 当前连续完成前缀长度。"""
     if not Path(group.output_path).exists():
         return 0
     rows_by_sample = {
@@ -120,6 +122,7 @@ def _resume_inference_groups_locked(
                 continue
 
             ran_chunk = True
+            # 按总有效行推进 chunk，允许前缀外已完成样本继续被复用。
             target_limit = min(group.limit, total_completed + chunk_size)
             print(
                 f"RUN {group.run_id} target={target_limit} "
@@ -272,6 +275,7 @@ def _resume_detector_groups_locked(
 
         for group in groups:
             _assert_response_file_ready(group)
+            # overwrite 只在每个 group 首次尝试生效，避免重试时反复清空新结果。
             group_overwrite = overwrite and group.run_id not in overwritten_groups
             status = _detector_group_status(group, overwrite=group_overwrite)
             target_count = status.valid + status.invalid + status.missing
