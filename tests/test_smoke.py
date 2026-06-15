@@ -1,7 +1,13 @@
+import json
 from pathlib import Path
 
 import pytest
+from PIL import Image, ImageDraw
 
+from src.datasets.build_xlrs_global_local_sr import (
+    BuildConfig,
+    build_xlrs_global_local_sr,
+)
 from src.datasets.convert_pope import convert_pope_record
 from src.datasets.prepare_xlrs_sr import prepare_xlrs_sr_record
 from src.datasets.schema import ModelResponse, ParsedResponse
@@ -143,6 +149,101 @@ def test_prepare_xlrs_sr_record_requires_sr_specific_image():
 
     with pytest.raises(ValueError, match="SR variant requires"):
         prepare_xlrs_sr_record(record, variant="sr", image_root="data/xlrs")
+
+
+def test_build_xlrs_global_local_sr_writes_variants_images_and_manifest(tmp_path):
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    original_path = image_dir / "sample.jpg"
+    image = Image.new("RGB", (64, 64), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((8, 8, 28, 28), fill="black")
+    draw.line((35, 4, 60, 60), fill="gray", width=3)
+    image.save(original_path)
+
+    input_path = tmp_path / "xlrs_eval.jsonl"
+    sample_id = "../unsafe/sample"
+    input_path.write_text(
+        json.dumps(
+            {
+                "sample_id": sample_id,
+                "dataset": "xlrs_bench",
+                "task_type": "remote_sensing_vqa",
+                "image_path": str(original_path),
+                "question": "Is there a dark building-like region?",
+                "reference_answer": "yes",
+                "choices": None,
+                "metadata": {
+                    "original_image_path": str(original_path),
+                    "max_side": 2048,
+                },
+                "taxonomy_hint": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = BuildConfig(
+        input_path=input_path,
+        output_dir=tmp_path / "processed",
+        sr_image_dir=tmp_path / "sr",
+        paired_image_dir=tmp_path / "paired",
+        manifest_dir=tmp_path / "manifests",
+        sr_scale=2,
+        max_side=96,
+        global_panel_size=64,
+        tile_panel_size=32,
+        grid_size=3,
+        top_k_tiles=5,
+    )
+    build_xlrs_global_local_sr(config)
+
+    original_rows = _read_jsonl(tmp_path / "processed" / "xlrs_eval_original.jsonl")
+    sr_rows = _read_jsonl(tmp_path / "processed" / "xlrs_eval_sr.jsonl")
+    paired_rows = _read_jsonl(tmp_path / "processed" / "xlrs_eval_paired.jsonl")
+
+    assert original_rows[0]["sample_id"] == f"{sample_id}_original"
+    assert sr_rows[0]["sample_id"] == f"{sample_id}_sr"
+    assert paired_rows[0]["sample_id"] == f"{sample_id}_paired"
+    assert Path(sr_rows[0]["image_path"]).is_file()
+    assert Path(paired_rows[0]["image_path"]).is_file()
+    assert Path(sr_rows[0]["image_path"]).parent == config.sr_image_dir
+    assert Path(paired_rows[0]["image_path"]).parent == config.paired_image_dir
+    assert ".." not in Path(sr_rows[0]["image_path"]).name
+    assert paired_rows[0]["metadata"]["evidence_protocol"] == (
+        "input_budget_aware_global_local_sr"
+    )
+    assert paired_rows[0]["metadata"]["max_side"] == 2048
+    assert paired_rows[0]["metadata"]["derived_image_max_side"] == 96
+    assert paired_rows[0]["metadata"]["top_k_tiles"] == 5
+
+    manifest_path = Path(paired_rows[0]["metadata"]["tile_manifest_path"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest_path.parent == config.manifest_dir
+    assert manifest["sample_id"] == sample_id
+    assert len(manifest["tiles"]) == 5
+    assert {tile["tile_id"] for tile in manifest["tiles"]}.issubset(
+        {f"tile_r{row}c{col}" for row in range(3) for col in range(3)}
+    )
+
+    with Image.open(sr_rows[0]["image_path"]) as sr_image:
+        assert max(sr_image.size) == 96
+    with Image.open(paired_rows[0]["image_path"]) as paired_image:
+        assert paired_image.size == (128, 128)
+
+
+def test_build_xlrs_global_local_sr_rejects_invalid_config():
+    with pytest.raises(ValueError, match="grid_size must be positive"):
+        BuildConfig(grid_size=0)
+    with pytest.raises(ValueError, match="top_k_tiles must be non-negative"):
+        BuildConfig(top_k_tiles=-1)
+    with pytest.raises(ValueError, match="jpeg_quality must be between"):
+        BuildConfig(jpeg_quality=101)
+
+
+def _read_jsonl(path: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 def test_normalize_yes_no():
