@@ -160,28 +160,28 @@ ONE_TENTH_INFERENCE_GROUPS: tuple[InferenceGroup, ...] = (
 XLRS_PILOT_INFERENCE_GROUPS: tuple[InferenceGroup, ...] = (
     InferenceGroup(
         experiment="xlrs_pilot",
-        run_id="xlrs_pilot_xlrs_bench_gpt54_direct_v1",
+        run_id="xlrs_pilot_xlrs_bench_gemini_direct_v1",
         dataset_path="data/processed/xlrs_eval.jsonl",
         prompt_path="prompts/answer/direct_xlrs.txt",
-        output_path="outputs/model_responses/xlrs_pilot_xlrs_bench_gpt54_direct.jsonl",
-        provider="gpt54_local",
+        output_path="outputs/model_responses/xlrs_pilot_xlrs_bench_gemini_direct.jsonl",
+        provider="gemini_local",
         limit=100,
         max_tokens=512,
         dataset="xlrs_bench",
-        model="gpt54",
+        model="gemini",
         prompt="direct",
     ),
     InferenceGroup(
         experiment="xlrs_pilot",
-        run_id="xlrs_pilot_xlrs_bench_gpt54_cot_v1",
+        run_id="xlrs_pilot_xlrs_bench_gemini_cot_v1",
         dataset_path="data/processed/xlrs_eval.jsonl",
         prompt_path="prompts/answer/evidence_grounded_cot_xlrs.txt",
-        output_path="outputs/model_responses/xlrs_pilot_xlrs_bench_gpt54_cot.jsonl",
-        provider="gpt54_local",
+        output_path="outputs/model_responses/xlrs_pilot_xlrs_bench_gemini_cot.jsonl",
+        provider="gemini_local",
         limit=100,
         max_tokens=512,
         dataset="xlrs_bench",
-        model="gpt54",
+        model="gemini",
         prompt="cot",
     ),
     InferenceGroup(
@@ -214,7 +214,7 @@ XLRS_PILOT_INFERENCE_GROUPS: tuple[InferenceGroup, ...] = (
 
 
 XLRS_SR_VARIANTS: tuple[str, ...] = ("original", "sr", "paired")
-XLRS_SR_MODELS: tuple[ModelName, ...] = ("gpt54", "qwen")
+XLRS_SR_MODELS: tuple[ModelName, ...] = ("gemini", "qwen")
 XLRS_SR_PROMPTS: tuple[PromptName, ...] = ("direct", "cot")
 
 XLRS_SR_INFERENCE_GROUPS: tuple[InferenceGroup, ...] = tuple(
@@ -231,9 +231,13 @@ XLRS_SR_INFERENCE_GROUPS: tuple[InferenceGroup, ...] = tuple(
             f"outputs/model_responses/xlrs_sr_{variant}_xlrs_bench_"
             f"{model}_{prompt}.jsonl"
         ),
-        provider="gpt54_local" if model == "gpt54" else "qwen",
+        provider=(
+            "gemini_local"
+            if model == "gemini"
+            else "gpt54_local" if model == "gpt54" else "qwen"
+        ),
         limit=100,
-        max_tokens=512,
+        max_tokens=1024 if model == "qwen" and prompt == "cot" else 512,
         dataset="xlrs_bench",
         model=model,
         prompt=prompt,
@@ -248,8 +252,15 @@ INFERENCE_GROUPS: tuple[InferenceGroup, ...] = (
 )
 
 
+def _detector_provider(group: InferenceGroup) -> str:
+    return "gemini_local" if group.dataset == "xlrs_bench" else "gpt54_local"
+
+
 def _detector_output_path(group: InferenceGroup) -> str:
-    return f"outputs/detector_results/{_run_stem(group.run_id)}_zero_shot_v2.jsonl"
+    suffix = "gemini_v2" if _detector_provider(group) == "gemini_local" else "v2"
+    return (
+        f"outputs/detector_results/{_run_stem(group.run_id)}_zero_shot_{suffix}.jsonl"
+    )
 
 
 def _run_stem(run_id: str) -> str:
@@ -261,11 +272,15 @@ def _run_stem(run_id: str) -> str:
 DETECTOR_GROUPS: tuple[DetectorGroup, ...] = tuple(
     DetectorGroup(
         experiment=group.experiment,
-        run_id=f"{group.run_id.replace('_v1', '')}_zero_shot_gpt54_v2",
+        run_id=(
+            f"{group.run_id.replace('_v1', '')}_zero_shot_gemini_v2"
+            if _detector_provider(group) == "gemini_local"
+            else f"{group.run_id.replace('_v1', '')}_zero_shot_gpt54_v2"
+        ),
         samples_path=group.dataset_path,
         responses_path=group.output_path,
         output_path=_detector_output_path(group),
-        provider="gpt54_local",
+        provider=_detector_provider(group),
         detector="zero_shot",
         dataset=group.dataset,
         model=group.model,

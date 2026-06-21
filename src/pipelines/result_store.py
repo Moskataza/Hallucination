@@ -22,6 +22,7 @@ from src.pipelines.jsonl_outputs import OutputStatus, inspect_output
 @dataclass(frozen=True)
 class PipelineStatus:
     """绑定 pipeline group 标识、阶段名称和输出完整性状态。"""
+
     group_id: str
     stage: str
     status: OutputStatus
@@ -78,16 +79,26 @@ def inspect_detector_group(group: DetectorGroup) -> PipelineStatus:
     """检查 detector 输出是否覆盖目标 response，并验证 sample/response 身份匹配。"""
 
     samples = _load_samples(group.samples_path)
-    target_ids = set(target_response_ids(group)) if Path(group.responses_path).exists() else set()
-    response_rows = {
-        f"{row['run_id']}:{row['sample_id']}": row
-        for row in read_json_records(group.responses_path)
-    } if Path(group.responses_path).exists() else {}
+    target_ids = (
+        set(target_response_ids(group))
+        if Path(group.responses_path).exists()
+        else set()
+    )
+    response_rows = (
+        {
+            f"{row['run_id']}:{row['sample_id']}": row
+            for row in read_json_records(group.responses_path)
+        }
+        if Path(group.responses_path).exists()
+        else {}
+    )
     status = inspect_output(
         group.output_path,
         target_ids=target_ids,
         key_fn=lambda row: str(row.get("model_response_id", "")),
-        invalid_row=lambda row: _should_retry_detector_row(row, samples)
+        invalid_row=lambda row: _should_retry_detector_row(
+            row, samples, provider=group.provider
+        )
         or not _is_detector_output_compatible(row, group, response_rows, samples),
     )
     return PipelineStatus(group_id=group.run_id, stage="detectors", status=status)

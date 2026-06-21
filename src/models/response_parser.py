@@ -108,7 +108,12 @@ def _extract_section(text: str, start_label: str, end_labels: tuple[str, ...]) -
 
 def _section_label_pattern(label: str) -> re.Pattern[str]:
     return re.compile(
-        rf"(?:^|\n)\s*(?:#{{1,6}}\s*)?(?:\*\*)?\s*(?:(?:[-*+]\s*)|(?:\d+[.)]\s*))?(?:\*\*)?\s*{re.escape(label)}\s*(?:[:：]\s*(?:\*\*)?|\*\*\s*[:：]\s*)",
+        rf"(?:^|\n)\s*"
+        rf"(?:#{{1,6}}\s*)?"
+        rf"(?:\*\*)?\s*"
+        rf"(?:(?:[-*+]\s*)|(?:\d+[.)]\s*))?"
+        rf"(?:\*\*)?\s*{re.escape(label)}\s*"
+        rf"(?:[:：]\s*(?:\*\*)?|\*\*\s*[:：]\s*|\*\*\s*(?=\n|$)|(?=\s*(?:\n|$)))",
         re.IGNORECASE,
     )
 

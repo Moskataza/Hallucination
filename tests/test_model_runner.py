@@ -356,6 +356,25 @@ def test_cot_response_with_reparsable_markdown_final_answer_is_valid():
     assert model_response_invalid_reason(row) is None
 
 
+def test_cot_response_with_heading_final_answer_is_valid():
+    row = {
+        "sample_id": "x",
+        "prompt_type": "evidence_grounded_cot",
+        "raw_response": (
+            "### 1. Visual Evidence\nA car is visible.\n"
+            "### 3. Reasoning\nThe vehicle shape supports the count.\n"
+            "### 4. Final Answer\nThere is 1 car visible."
+        ),
+        "parsed": {
+            "parse_status": "fallback",
+            "final_answer": "There is 1 car visible.",
+        },
+        "inference_metadata": {},
+    }
+
+    assert model_response_invalid_reason(row) is None
+
+
 def test_prepare_output_rows_resume_removes_token_limit_truncated_rows(tmp_path: Path):
     output = tmp_path / "responses.jsonl"
     valid = _valid_response_row("valid")
@@ -1802,7 +1821,7 @@ def test_provider_configs():
     thinking = get_provider_config("openrouter_qwen3_vl_thinking")
 
     assert gemini.default_model == "gemini-2.5-flash"
-    assert gemini.base_url_env is None
+    assert gemini.base_url_env == "GEMINI_LOCAL_BASE_URL"
     assert gpt54.default_model == "gpt-5.4-mini"
     assert gpt54.api_key_env == "CHATGPT_LOCAL_KEY"
     assert gpt54.base_url_env == "GPT54_LOCAL_BASE_URL"

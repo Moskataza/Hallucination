@@ -186,6 +186,7 @@ _JUDGE_RESPONSE_FORMAT = {
 
 class JudgeClient(Protocol):
     """描述 judge 所需的最小多模态 chat completion 接口，便于测试替换。"""
+
     def chat_completion(
         self,
         *,
@@ -499,6 +500,7 @@ def judge_response(
         prompt=prompt,
         image_path=image_path,
         model=model,
+        provider=provider,
         temperature=temperature,
         max_tokens=max_tokens,
         allowed_image_root=allowed_image_root,
@@ -510,10 +512,18 @@ def judge_response(
         raise ValueError("Could not parse judge response as JSON.")
     if details.get("raw_is_hallucination") is None:
         raise ValueError("Judge response has null required detector fields.")
-    if details.get("answer_correct") is None and _has_reference_answer(sample):
+    if (
+        provider != "gemini_local"
+        and details.get("answer_correct") is None
+        and _has_reference_answer(sample)
+    ):
         raise ValueError(
             "Judge response has null answer correctness despite available reference answer."
         )
+    if details.get("raw_is_hallucination") is True and not details.get(
+        "hallucination_labels"
+    ):
+        raise ValueError("Judge response marks hallucination without supported labels.")
     return details_to_detector_result(
         sample=sample,
         response=response,
@@ -530,32 +540,57 @@ def _call_judge_model(
     prompt: str,
     image_path: Path,
     model: str | None,
+    provider: str | None,
     temperature: float,
     max_tokens: int,
     allowed_image_root: Path,
     max_image_bytes: int,
 ) -> dict[str, Any]:
-    kwargs = {
-        "prompt": prompt,
-        "image_path": image_path,
-        "model": model,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "allowed_image_root": allowed_image_root,
-        "max_image_bytes": max_image_bytes,
-    }
+    if provider == "gemini_local":
+        return client.chat_completion(
+            prompt=prompt,
+            image_path=image_path,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            allowed_image_root=allowed_image_root,
+            max_image_bytes=max_image_bytes,
+        )
+
     try:
         return client.chat_completion(
-            **kwargs,
+            prompt=prompt,
+            image_path=image_path,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            allowed_image_root=allowed_image_root,
+            max_image_bytes=max_image_bytes,
             response_format=_JUDGE_RESPONSE_FORMAT,
         )
     except TypeError as exc:
         if _is_response_format_unsupported_error(exc):
-            return client.chat_completion(**kwargs)
+            return client.chat_completion(
+                prompt=prompt,
+                image_path=image_path,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                allowed_image_root=allowed_image_root,
+                max_image_bytes=max_image_bytes,
+            )
         raise
     except RuntimeError as exc:
         if _is_response_format_unsupported_error(exc):
-            return client.chat_completion(**kwargs)
+            return client.chat_completion(
+                prompt=prompt,
+                image_path=image_path,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                allowed_image_root=allowed_image_root,
+                max_image_bytes=max_image_bytes,
+            )
         raise
 
 
@@ -942,7 +977,7 @@ def _prepare_output_rows(
     rows = [
         row
         for row in read_json_records(output_path)
-        if not _should_retry_detector_row(row, samples)
+        if not _should_retry_detector_row(row, samples, provider=provider)
         and _is_compatible_existing_detector_row(
             row,
             run_id=run_id,
@@ -988,7 +1023,7 @@ def _is_compatible_existing_detector_row(
 
 
 def _should_retry_detector_row(
-    row: dict[str, Any], samples: dict[str, EvalSample]
+    row: dict[str, Any], samples: dict[str, EvalSample], *, provider: str | None = None
 ) -> bool:
     details = row.get("details")
     if not isinstance(details, dict):
@@ -1005,8 +1040,17 @@ def _should_retry_detector_row(
     sample = samples.get(str(row.get("sample_id", "")))
     if sample is None:
         return True
-    if row.get("answer_correct") is None and _has_reference_answer(sample):
+    if (
+        provider != "gemini_local"
+        and row.get("answer_correct") is None
+        and _has_reference_answer(sample)
+    ):
         return True
+    if row.get("is_hallucination") is True and not details.get("hallucination_labels"):
+        taxonomy = row.get("taxonomy")
+        fine_label = taxonomy.get("fine") if isinstance(taxonomy, dict) else None
+        if normalize_fine_label(str(fine_label)) not in _LABEL_ORDER:
+            return True
     explanation = str(row.get("explanation", details.get("explanation", "")))
     return (
         explanation.startswith("Judge inference failed:")
@@ -1032,7 +1076,9 @@ def _validate_completed_detector_output(
     invalid = sorted(
         response_id
         for response_id in target_response_ids & set(rows_by_response_id)
-        if _should_retry_detector_row(rows_by_response_id[response_id], samples)
+        if _should_retry_detector_row(
+            rows_by_response_id[response_id], samples, provider=provider
+        )
         or not _is_compatible_existing_detector_row(
             rows_by_response_id[response_id],
             run_id=run_id,

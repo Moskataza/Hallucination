@@ -43,6 +43,7 @@ PROVIDERS: dict[str, ProviderConfig] = {
         api_key_env="GEMINI_LOCAL_API_KEY",
         default_model="gemini-2.5-flash",
         model_type="closed",
+        base_url_env="GEMINI_LOCAL_BASE_URL",
     ),
     "gpt54_local": ProviderConfig(
         name="gpt54_local",
@@ -71,6 +72,7 @@ PROVIDERS: dict[str, ProviderConfig] = {
 
 class OpenAICompatibleClient:
     """封装 OpenAI-compatible 多模态请求的鉴权、payload 构造和重试。"""
+
     def __init__(
         self,
         config: ProviderConfig,

@@ -550,6 +550,25 @@ def test_judge_response_attaches_image_and_returns_detector_result(tmp_path: Pat
     assert schema["additionalProperties"] is False
 
 
+def test_judge_response_skips_response_format_for_gemini(tmp_path: Path):
+    raw = json.dumps(_judge_payload())
+    client = FakeJudgeClient(raw)
+
+    result = judge_response(
+        _sample("data/raw/pope/sample.jpg"),
+        _response(),
+        client=client,
+        run_id="judge_run_1",
+        provider="gemini_local",
+        path_base=tmp_path,
+        image_root="data/raw",
+    )
+
+    assert result.is_hallucination is True
+    assert len(client.calls) == 1
+    assert "response_format" not in client.calls[0]
+
+
 def test_judge_response_falls_back_when_response_format_is_unsupported(tmp_path: Path):
     raw = json.dumps(_judge_payload())
 
@@ -658,6 +677,64 @@ def test_detect_file_resume_skips_existing_response(
     rows = list(read_jsonl(output))
     assert len(rows) == 1
     assert rows[0]["explanation"] == "already judged"
+
+
+def test_detect_file_resume_retries_null_answer_correct_for_non_gemini(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
+    write_jsonl(responses, [_response().to_dict()])
+    write_jsonl(
+        output,
+        [
+            {
+                "run_id": "judge_run_1",
+                "sample_id": "pope_1",
+                "model_response_id": "model_run_1:pope_1",
+                "detector": "response_claim_zero_shot_judge",
+                "answer_correct": None,
+                "is_hallucination": True,
+                "taxonomy": {"coarse": "Factual", "fine": "OBJ"},
+                "unsupported_visual_claim": True,
+                "confidence": "high",
+                "explanation": "stale null answer correctness",
+                "raw_judge_response": "{}",
+                "dataset": "pope",
+                "model": "qwen/qwen3-vl-8b-instruct",
+                "prompt_type": "evidence_grounded_cot",
+                "details": {
+                    **_judge_payload(answer_correct=None),
+                    "judge_provider": "openrouter_qwen3_vl_instruct",
+                },
+            }
+        ],
+    )
+
+    class RecoveringClient:
+        def __init__(self, config: Any) -> None:
+            self.config = config
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            return {"choices": [{"message": {"content": json.dumps(_judge_payload())}}]}
+
+    monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", RecoveringClient)
+
+    zero_shot_judge.detect_file(
+        samples,
+        responses,
+        output,
+        provider="openrouter_qwen3_vl_instruct",
+        run_id="judge_run_1",
+        resume=True,
+    )
+
+    rows = list(read_jsonl(output))
+    assert len(rows) == 1
+    assert rows[0]["answer_correct"] is False
+    assert rows[0]["explanation"] != "stale null answer correctness"
 
 
 def test_detect_file_resume_retries_judge_failure_fallback(
@@ -1010,6 +1087,134 @@ def test_detect_file_retries_null_required_judge_fields(
     assert rows[0]["taxonomy"] == {"coarse": "Factual", "fine": "OBJ"}
 
 
+def test_detect_file_allows_null_answer_correct_with_valid_hallucination(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
+    write_jsonl(responses, [_response().to_dict()])
+
+    class NullAnswerCorrectClient:
+        def __init__(self, config: Any) -> None:
+            self.calls = 0
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            payload = _judge_payload(answer_correct=None, is_hallucination=True)
+            return {"choices": [{"message": {"content": json.dumps(payload)}}]}
+
+    monkeypatch.setattr(
+        zero_shot_judge, "OpenAICompatibleClient", NullAnswerCorrectClient
+    )
+
+    zero_shot_judge.detect_file(
+        samples,
+        responses,
+        output,
+        provider="gemini_local",
+        run_id="judge_run_1",
+        overwrite=True,
+    )
+
+    rows = list(read_jsonl(output))
+    assert len(rows) == 1
+    assert rows[0]["answer_correct"] is None
+    assert rows[0]["is_hallucination"] is True
+    assert rows[0]["taxonomy"] == {"coarse": "Factual", "fine": "OBJ"}
+
+    zero_shot_judge.detect_file(
+        samples,
+        responses,
+        output,
+        provider="gemini_local",
+        run_id="judge_run_1",
+        resume=True,
+    )
+
+    assert len(list(read_jsonl(output))) == 1
+
+
+def test_detect_file_retries_null_answer_correct_for_non_gemini(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
+    write_jsonl(responses, [_response().to_dict()])
+
+    class RecoveringClient:
+        def __init__(self, config: Any) -> None:
+            self.calls = 0
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            if self.calls == 1:
+                payload = _judge_payload(answer_correct=None, is_hallucination=True)
+                return {"choices": [{"message": {"content": json.dumps(payload)}}]}
+            return {"choices": [{"message": {"content": json.dumps(_judge_payload())}}]}
+
+    monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", RecoveringClient)
+
+    zero_shot_judge.detect_file(
+        samples,
+        responses,
+        output,
+        provider="openrouter_qwen3_vl_instruct",
+        run_id="judge_run_1",
+        overwrite=True,
+    )
+
+    rows = list(read_jsonl(output))
+    assert len(rows) == 1
+    assert rows[0]["answer_correct"] is False
+
+
+def test_detect_file_retries_hallucination_without_labels(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    samples = tmp_path / "samples.jsonl"
+    responses = tmp_path / "responses.jsonl"
+    output = tmp_path / "judge.jsonl"
+    write_jsonl(samples, [_sample("data/raw/pope/sample.jpg").to_dict()])
+    write_jsonl(responses, [_response().to_dict()])
+
+    class RecoveringClient:
+        def __init__(self, config: Any) -> None:
+            self.calls = 0
+
+        def chat_completion(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            if self.calls == 1:
+                payload = _judge_payload(
+                    is_hallucination=True,
+                    hallucination_vector=[0, 0, 0, 0, 0, 0, 0],
+                    hallucination_labels=[],
+                    primary_label="None",
+                    claim_checks=[],
+                )
+                return {"choices": [{"message": {"content": json.dumps(payload)}}]}
+            return {"choices": [{"message": {"content": json.dumps(_judge_payload())}}]}
+
+    monkeypatch.setattr(zero_shot_judge, "OpenAICompatibleClient", RecoveringClient)
+
+    zero_shot_judge.detect_file(
+        samples,
+        responses,
+        output,
+        provider="gemini_local",
+        run_id="judge_run_1",
+        overwrite=True,
+    )
+
+    rows = list(read_jsonl(output))
+    assert len(rows) == 1
+    assert rows[0]["is_hallucination"] is True
+    assert rows[0]["taxonomy"] == {"coarse": "Factual", "fine": "OBJ"}
+
+
 def test_detect_file_retries_null_hallucination_even_with_answer_correct(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -1094,7 +1299,7 @@ def test_detect_file_allows_null_answer_correct_for_unavailable_reference(
             self.calls += 1
             payload = _judge_payload(
                 answer_correct=None,
-                is_hallucination=self.calls > 1,
+                is_hallucination=False,
                 hallucination_vector=[0, 0, 0, 0, 0, 0, 0],
                 hallucination_labels=[],
                 primary_label="None",

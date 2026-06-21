@@ -28,23 +28,30 @@ def test_select_inference_groups_filters_registered_experiment() -> None:
     }
 
 
-def test_xlrs_pilot_uses_gpt54_instead_of_gemini() -> None:
+def test_xlrs_pilot_uses_gemini_and_qwen_without_gpt54() -> None:
     gpt54_groups = select_inference_groups(
         experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"gpt54"}
     )
     gemini_groups = select_inference_groups(
         experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"gemini"}
     )
+    qwen_groups = select_inference_groups(
+        experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"qwen"}
+    )
 
-    assert {group.run_id for group in gpt54_groups} == {
-        "xlrs_pilot_xlrs_bench_gpt54_direct_v1",
-        "xlrs_pilot_xlrs_bench_gpt54_cot_v1",
+    assert gpt54_groups == []
+    assert {group.run_id for group in gemini_groups} == {
+        "xlrs_pilot_xlrs_bench_gemini_direct_v1",
+        "xlrs_pilot_xlrs_bench_gemini_cot_v1",
     }
-    assert {group.provider for group in gpt54_groups} == {"gpt54_local"}
-    assert gemini_groups == []
+    assert {group.provider for group in gemini_groups} == {"gemini_local"}
+    assert {group.run_id for group in qwen_groups} == {
+        "xlrs_pilot_xlrs_bench_qwen_direct_v1",
+        "xlrs_pilot_xlrs_bench_qwen_cot_v1",
+    }
 
 
-def test_xlrs_pilot_detector_groups_use_gpt54_response_paths() -> None:
+def test_xlrs_pilot_detector_groups_use_gemini_judge_paths() -> None:
     gpt54_groups = select_detector_groups(
         experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"gpt54"}
     )
@@ -52,35 +59,41 @@ def test_xlrs_pilot_detector_groups_use_gpt54_response_paths() -> None:
         experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"gemini"}
     )
 
-    assert {group.run_id for group in gpt54_groups} == {
-        "xlrs_pilot_xlrs_bench_gpt54_direct_zero_shot_gpt54_v2",
-        "xlrs_pilot_xlrs_bench_gpt54_cot_zero_shot_gpt54_v2",
+    assert gpt54_groups == []
+    assert {group.run_id for group in gemini_groups} == {
+        "xlrs_pilot_xlrs_bench_gemini_direct_zero_shot_gemini_v2",
+        "xlrs_pilot_xlrs_bench_gemini_cot_zero_shot_gemini_v2",
     }
-    assert {group.responses_path for group in gpt54_groups} == {
-        "outputs/model_responses/xlrs_pilot_xlrs_bench_gpt54_direct.jsonl",
-        "outputs/model_responses/xlrs_pilot_xlrs_bench_gpt54_cot.jsonl",
+    assert {group.responses_path for group in gemini_groups} == {
+        "outputs/model_responses/xlrs_pilot_xlrs_bench_gemini_direct.jsonl",
+        "outputs/model_responses/xlrs_pilot_xlrs_bench_gemini_cot.jsonl",
     }
-    assert {group.output_path for group in gpt54_groups} == {
-        "outputs/detector_results/xlrs_pilot_xlrs_bench_gpt54_direct_zero_shot_v2.jsonl",
-        "outputs/detector_results/xlrs_pilot_xlrs_bench_gpt54_cot_zero_shot_v2.jsonl",
+    assert {group.output_path for group in gemini_groups} == {
+        "outputs/detector_results/xlrs_pilot_xlrs_bench_gemini_direct_zero_shot_gemini_v2.jsonl",
+        "outputs/detector_results/xlrs_pilot_xlrs_bench_gemini_cot_zero_shot_gemini_v2.jsonl",
     }
-    assert {group.model for group in gpt54_groups} == {"gpt54"}
-    assert {group.provider for group in gpt54_groups} == {"gpt54_local"}
-    assert gemini_groups == []
+    assert {group.model for group in gemini_groups} == {"gemini"}
+    assert {group.provider for group in gemini_groups} == {"gemini_local"}
 
 
-def test_xlrs_sr_registers_original_sr_and_paired_groups() -> None:
+@pytest.mark.parametrize(
+    ("model", "provider"),
+    [("gemini", "gemini_local"), ("qwen", "qwen")],
+)
+def test_xlrs_sr_registers_original_sr_and_paired_groups(
+    model: str, provider: str
+) -> None:
     groups = select_inference_groups(
-        experiments={"xlrs_sr"}, datasets={"xlrs_bench"}, models={"gpt54"}
+        experiments={"xlrs_sr"}, datasets={"xlrs_bench"}, models={model}
     )
 
     assert {group.run_id for group in groups} == {
-        "xlrs_sr_original_xlrs_bench_gpt54_direct_v1",
-        "xlrs_sr_original_xlrs_bench_gpt54_cot_v1",
-        "xlrs_sr_sr_xlrs_bench_gpt54_direct_v1",
-        "xlrs_sr_sr_xlrs_bench_gpt54_cot_v1",
-        "xlrs_sr_paired_xlrs_bench_gpt54_direct_v1",
-        "xlrs_sr_paired_xlrs_bench_gpt54_cot_v1",
+        f"xlrs_sr_original_xlrs_bench_{model}_direct_v1",
+        f"xlrs_sr_original_xlrs_bench_{model}_cot_v1",
+        f"xlrs_sr_sr_xlrs_bench_{model}_direct_v1",
+        f"xlrs_sr_sr_xlrs_bench_{model}_cot_v1",
+        f"xlrs_sr_paired_xlrs_bench_{model}_direct_v1",
+        f"xlrs_sr_paired_xlrs_bench_{model}_cot_v1",
     }
     assert {group.dataset_path for group in groups} == {
         "data/processed/xlrs_eval_original.jsonl",
@@ -91,7 +104,15 @@ def test_xlrs_sr_registers_original_sr_and_paired_groups() -> None:
         "prompts/answer/direct_xlrs_sr.txt",
         "prompts/answer/evidence_grounded_cot_xlrs_sr.txt",
     }
-    assert {group.provider for group in groups} == {"gpt54_local"}
+    assert {group.provider for group in groups} == {provider}
+    expected_max_tokens = {1024, 512} if model == "qwen" else {512}
+    assert {group.max_tokens for group in groups} == expected_max_tokens
+    if model == "qwen":
+        assert {group.run_id for group in groups if group.max_tokens == 1024} == {
+            "xlrs_sr_original_xlrs_bench_qwen_cot_v1",
+            "xlrs_sr_sr_xlrs_bench_qwen_cot_v1",
+            "xlrs_sr_paired_xlrs_bench_qwen_cot_v1",
+        }
 
 
 def test_xlrs_sr_detector_paths_keep_variant_names() -> None:
@@ -103,9 +124,9 @@ def test_xlrs_sr_detector_paths_keep_variant_names() -> None:
     )
 
     assert {group.output_path for group in groups} == {
-        "outputs/detector_results/xlrs_sr_original_xlrs_bench_qwen_cot_zero_shot_v2.jsonl",
-        "outputs/detector_results/xlrs_sr_sr_xlrs_bench_qwen_cot_zero_shot_v2.jsonl",
-        "outputs/detector_results/xlrs_sr_paired_xlrs_bench_qwen_cot_zero_shot_v2.jsonl",
+        "outputs/detector_results/xlrs_sr_original_xlrs_bench_qwen_cot_zero_shot_gemini_v2.jsonl",
+        "outputs/detector_results/xlrs_sr_sr_xlrs_bench_qwen_cot_zero_shot_gemini_v2.jsonl",
+        "outputs/detector_results/xlrs_sr_paired_xlrs_bench_qwen_cot_zero_shot_gemini_v2.jsonl",
     }
     assert {group.responses_path for group in groups} == {
         "outputs/model_responses/xlrs_sr_original_xlrs_bench_qwen_cot.jsonl",
@@ -114,7 +135,7 @@ def test_xlrs_sr_detector_paths_keep_variant_names() -> None:
     }
 
 
-def test_stable_pipeline_cli_accepts_xlrs_gpt54_validate(
+def test_stable_pipeline_cli_accepts_xlrs_gemini_validate(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     samples = tmp_path / "samples.jsonl"
@@ -126,10 +147,10 @@ def test_stable_pipeline_cli_accepts_xlrs_gpt54_validate(
         write_jsonl(path, [_sample_row("sample_0")])
 
     inference_groups = select_inference_groups(
-        experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"gpt54"}
+        experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"gemini"}
     )
     detector_groups = select_detector_groups(
-        experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"gpt54"}
+        experiments={"xlrs_pilot"}, datasets={"xlrs_bench"}, models={"gemini"}
     )
     inference_by_prompt = {group.prompt: group for group in inference_groups}
     detector_by_prompt = {group.prompt: group for group in detector_groups}
@@ -214,7 +235,7 @@ def test_stable_pipeline_cli_accepts_xlrs_gpt54_validate(
             "--dataset",
             "xlrs_bench",
             "--model",
-            "gpt54",
+            "gemini",
             "--stage",
             "validate",
         ],
@@ -223,12 +244,12 @@ def test_stable_pipeline_cli_accepts_xlrs_gpt54_validate(
     run_stable_pipeline.main()
 
     assert inspected_inference == [
-        "xlrs_pilot_xlrs_bench_gpt54_direct_v1",
-        "xlrs_pilot_xlrs_bench_gpt54_cot_v1",
+        "xlrs_pilot_xlrs_bench_gemini_direct_v1",
+        "xlrs_pilot_xlrs_bench_gemini_cot_v1",
     ]
     assert inspected_detectors == [
-        "xlrs_pilot_xlrs_bench_gpt54_direct_zero_shot_gpt54_v2",
-        "xlrs_pilot_xlrs_bench_gpt54_cot_zero_shot_gpt54_v2",
+        "xlrs_pilot_xlrs_bench_gemini_direct_zero_shot_gemini_v2",
+        "xlrs_pilot_xlrs_bench_gemini_cot_zero_shot_gemini_v2",
     ]
 
 
